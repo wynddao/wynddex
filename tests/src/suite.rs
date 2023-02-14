@@ -13,11 +13,11 @@ use wyndex::factory::{
     QueryMsg as FactoryQueryMsg,
 };
 use wyndex::fee_config::FeeConfig;
-use wyndex::multi_hop::{
-    ExecuteMsg, InstantiateMsg, QueryMsg, SimulateSwapOperationsResponse, SwapOperation,
-};
 use wyndex::pair::{ExecuteMsg as PairExecuteMsg, PairInfo};
 use wyndex::stake::UnbondingPeriod;
+use wyndex_multi_hop::msg::{
+    ExecuteMsg, InstantiateMsg, QueryMsg, SimulateSwapOperationsResponse, SwapOperation,
+};
 use wyndex_stake::msg::ExecuteMsg as StakeExecuteMsg;
 
 fn store_multi_hop(app: &mut App) -> u64 {

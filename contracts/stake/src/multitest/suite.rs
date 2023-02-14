@@ -16,8 +16,8 @@ use wyndex::{
 use crate::msg::{
     AllStakedResponse, AnnualizedReward, AnnualizedRewardsResponse, BondingInfoResponse,
     BondingPeriodInfo, DelegatedResponse, DistributedRewardsResponse, ExecuteMsg, QueryMsg,
-    ReceiveDelegationMsg, RewardsPowerResponse, StakedResponse, UndistributedRewardsResponse,
-    WithdrawableRewardsResponse,
+    ReceiveDelegationMsg, RewardsPowerResponse, StakedResponse, TotalStakedResponse,
+    UndistributedRewardsResponse, WithdrawableRewardsResponse,
 };
 
 pub const SEVEN_DAYS: u64 = 604800;
@@ -61,6 +61,7 @@ pub struct SuiteBuilder {
     pub min_bond: Uint128,
     pub unbonding_periods: Vec<UnbondingPeriod>,
     pub admin: Option<String>,
+    pub unbonder: Option<String>,
     pub initial_balances: Vec<Cw20Coin>,
     pub native_balances: Vec<(Addr, Coin)>,
 }
@@ -73,6 +74,7 @@ impl SuiteBuilder {
             min_bond: Uint128::new(5000),
             unbonding_periods: vec![SEVEN_DAYS],
             admin: None,
+            unbonder: None,
             initial_balances: vec![],
             native_balances: vec![],
         }
@@ -109,8 +111,18 @@ impl SuiteBuilder {
         self
     }
 
+    pub fn with_tokens_per_power(mut self, tokens_per_power: u128) -> Self {
+        self.tokens_per_power = tokens_per_power.into();
+        self
+    }
+
     pub fn with_admin(mut self, admin: &str) -> Self {
         self.admin = Some(admin.to_owned());
+        self
+    }
+
+    pub fn with_unbonder(mut self, unbonder: &str) -> Self {
+        self.unbonder = Some(unbonder.to_owned());
         self
     }
 
@@ -174,6 +186,7 @@ impl SuiteBuilder {
                     min_bond: self.min_bond,
                     unbonding_periods: self.unbonding_periods,
                     admin: self.admin,
+                    unbonder: self.unbonder,
                     max_distributions: 6,
                 },
                 &[],
@@ -335,6 +348,16 @@ impl Suite {
                 tokens: amount.into(),
                 unbonding_period: self.unbonding_period_or_default(unbonding_period),
             },
+            &[],
+        )
+    }
+
+    pub fn quick_unbond(&mut self, sender: &str, stakers: &[&str]) -> AnyResult<AppResponse> {
+        let stakers = stakers.iter().map(|s| s.to_string()).collect();
+        self.app.execute_contract(
+            Addr::unchecked(sender),
+            self.stake_contract.clone(),
+            &ExecuteMsg::QuickUnbond { stakers },
             &[],
         )
     }
@@ -579,6 +602,14 @@ impl Suite {
             },
         )?;
         Ok(all_staked)
+    }
+
+    pub fn query_total_staked(&self) -> StdResult<u128> {
+        let total_staked: TotalStakedResponse = self
+            .app
+            .wrap()
+            .query_wasm_smart(self.stake_contract.clone(), &QueryMsg::TotalStaked {})?;
+        Ok(total_staked.total_staked.u128())
     }
 
     pub fn query_claims(&self, address: &str) -> StdResult<Vec<Claim>> {

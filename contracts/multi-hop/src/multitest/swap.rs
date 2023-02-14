@@ -6,9 +6,9 @@ use wyndex::pair::{add_referral, take_referral};
 use wyndex::querier::query_factory_config;
 
 use crate::error::ContractError;
+use crate::msg::{SwapOperation, MAX_SWAP_OPERATIONS};
 use wyndex::asset::{AssetInfo, AssetInfoExt, AssetInfoValidated};
 use wyndex::factory::PairType;
-use wyndex::multi_hop::{SwapOperation, MAX_SWAP_OPERATIONS};
 
 #[test]
 fn must_provide_operations() {

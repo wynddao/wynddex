@@ -1,9 +1,7 @@
 use cosmwasm_std::{coin, testing::mock_env};
 use tests::SuiteBuilder;
-use wyndex::{
-    asset::{AssetInfo, AssetInfoExt},
-    multi_hop::SwapOperation,
-};
+use wyndex::asset::{AssetInfo, AssetInfoExt};
+use wyndex_multi_hop::msg::SwapOperation;
 
 #[test]
 fn trading_frozen() {

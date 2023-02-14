@@ -764,6 +764,7 @@ dependencies = [
  "cw-multi-test",
  "cw-storage-plus 1.0.1",
  "cw-utils 0.11.1",
+ "cw-utils 1.0.1",
  "cw2 1.0.1",
  "cw20 0.10.3",
  "cw20 1.0.1",

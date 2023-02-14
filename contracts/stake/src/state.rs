@@ -23,6 +23,8 @@ pub struct Config {
     pub unbonding_periods: Vec<UnbondingPeriod>,
     /// the maximum number of distributions that can be created
     pub max_distributions: u32,
+    /// Address of the account that can call [`ExecuteMsg::QuickUnbond`]
+    pub unbonder: Option<Addr>,
 }
 
 #[cw_serde]
@@ -79,6 +81,15 @@ impl BondingInfo {
 
         self.stake = new_stake;
 
+        Ok(self.stake)
+    }
+
+    /// Releases all locked stake, regardless of its bonding time
+    /// On success, returns the unlocked stake (which is also the total stake)
+    pub fn force_unlock_all(&mut self) -> Result<Uint128, OverflowError> {
+        let locked: Uint128 = self.locked_tokens.iter().map(|(_, amount)| amount).sum();
+        self.stake = self.stake.checked_add(locked)?;
+        self.locked_tokens = vec![];
         Ok(self.stake)
     }
 

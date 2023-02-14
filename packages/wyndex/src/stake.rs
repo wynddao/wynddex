@@ -16,4 +16,6 @@ pub struct InstantiateMsg {
 
     // admin can only add/remove hooks and add distributions, not change other parameters
     pub admin: Option<String>,
+    /// Address of the account that can call [`ExecuteMsg::QuickUnbond`]
+    pub unbonder: Option<String>,
 }

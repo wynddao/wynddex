@@ -6,6 +6,7 @@ use cosmwasm_std::{
 };
 
 use cw2::{get_contract_version, set_contract_version};
+use cw_utils::ensure_from_older_version;
 use wasmswap::msg::InfoResponse;
 use wyndex::asset::{Asset, AssetInfo};
 
@@ -45,45 +46,54 @@ pub fn query(_deps: Deps, _env: Env, msg: QueryMsg) -> Result<Binary, ContractEr
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, ContractError> {
-    // ensure contract being migrated is actually junoswap staking
-    let old = get_contract_version(deps.storage)?;
-    if old.contract != STAKE_CW20_NAME {
-        return Err(ContractError::CannotMigrate(old.contract));
+    // if we got an init, then do from junoswap loop
+    if let Some(msg) = msg.init {
+        // ensure contract being migrated is actually junoswap staking
+        let old = get_contract_version(deps.storage)?;
+        if old.contract != STAKE_CW20_NAME {
+            return Err(ContractError::CannotMigrate(old.contract));
+        }
+        // question: check version??
+
+        // update the cw2 contract version
+        set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+
+        // check the unbonding period is valid
+        let factory = deps.api.addr_validate(&msg.factory)?;
+        let unbonding_period = msg.unbonding_period;
+        let wyndex_factory::state::Config {
+            default_stake_config,
+            ..
+        } = wyndex_factory::state::CONFIG.query(&deps.querier, factory.clone())?;
+        if !default_stake_config
+            .unbonding_periods
+            .iter()
+            .any(|x| x == &unbonding_period)
+        {
+            return Err(ContractError::InvalidUnbondingPeriod(unbonding_period));
+        }
+
+        // Validate arguments and set config for future calls
+        let wynddex_pool = msg
+            .wynddex_pool
+            .map(|p| deps.api.addr_validate(&p))
+            .transpose()?;
+        let config = MigrateConfig {
+            migrator: deps.api.addr_validate(&msg.migrator)?,
+            junoswap_pool: deps.api.addr_validate(&msg.junoswap_pool)?,
+            factory,
+            unbonding_period,
+            wynddex_pool,
+            migrate_stakers_config: None,
+        };
+        MIGRATION.save(deps.storage, &config)?;
+    } else {
+        // self-migrate
+        // this is only used as a bug-fix-patch on the older version of this code.
+        ensure_from_older_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+        // update the cw2 contract version
+        set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
     }
-    // question: check version??
-
-    // update the cw2 contract version
-    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-
-    // check the unbonding period is valid
-    let factory = deps.api.addr_validate(&msg.factory)?;
-    let unbonding_period = msg.unbonding_period;
-    let wyndex_factory::state::Config {
-        default_stake_config,
-        ..
-    } = wyndex_factory::state::CONFIG.query(&deps.querier, factory.clone())?;
-    if !default_stake_config
-        .unbonding_periods
-        .iter()
-        .any(|x| x == &unbonding_period)
-    {
-        return Err(ContractError::InvalidUnbondingPeriod(unbonding_period));
-    }
-
-    // Validate arguments and set config for future calls
-    let wynddex_pool = msg
-        .wynddex_pool
-        .map(|p| deps.api.addr_validate(&p))
-        .transpose()?;
-    let config = MigrateConfig {
-        migrator: deps.api.addr_validate(&msg.migrator)?,
-        junoswap_pool: deps.api.addr_validate(&msg.junoswap_pool)?,
-        factory,
-        unbonding_period,
-        wynddex_pool,
-        migrate_stakers_config: None,
-    };
-    MIGRATION.save(deps.storage, &config)?;
 
     Ok(Response::new())
 }
@@ -111,15 +121,15 @@ pub fn migrate_tokens(
     wynddex_pool: String,
 ) -> Result<Response, ContractError> {
     // make sure called by proper account
-    let migration = MIGRATION.load(deps.storage)?;
+    let mut migration = MIGRATION.load(deps.storage)?;
     if info.sender != migration.migrator {
         return Err(ContractError::Unauthorized);
     }
 
     // ensure the requested target pool is valid
     let w_pool = deps.api.addr_validate(&wynddex_pool)?;
-    if let Some(target) = migration.wynddex_pool {
-        if target != w_pool {
+    if let Some(ref target) = migration.wynddex_pool {
+        if target != &w_pool {
             return Err(ContractError::InvalidDestination(wynddex_pool));
         }
     }
@@ -131,11 +141,31 @@ pub fn migrate_tokens(
     // save target pool for later reply block
     DESTINATION.save(deps.storage, &w_pool)?;
 
-    // trigger withdrawal of LP tokens
+    // calculate LP tokens owner by staking contract,
+    // for withdrawal and for future distribution
     let stake_cfg = stake_cw20::state::CONFIG.load(deps.storage)?;
     let token = cw20::Cw20Contract(stake_cfg.token_address);
     let balance = token.balance(&deps.querier, env.contract.address)?;
 
+    // fill in most of the migration data now (minus wynd dex LP)
+    let wyndex::pair::PairInfo {
+        liquidity_token,
+        staking_addr,
+        ..
+    } = deps
+        .querier
+        .query_wasm_smart(&w_pool, &wyndex::pair::QueryMsg::Pair {})?;
+
+    // total_staked is same a balance of junoswap lp token held by this contract
+    migration.migrate_stakers_config = Some(MigrateStakersConfig {
+        lp_token: liquidity_token,
+        staking_addr,
+        total_lp_tokens: Uint128::zero(),
+        total_staked: balance,
+    });
+    MIGRATION.save(deps.storage, &migration)?;
+
+    // trigger withdrawal of LP tokens
     // we need to assign a cw20 allowance to let the pool burn LP
     let allowance = WasmMsg::Execute {
         contract_addr: token.0.to_string(),
@@ -186,7 +216,7 @@ pub fn migrate_stakers(
     // remove the processed stakers from the state
     remove_stakers(deps.branch(), &env, stakers.iter().map(|(addr, _)| addr))?;
 
-    let mut staker_lps: Vec<_> = stakers
+    let staker_lps: Vec<_> = stakers
         .into_iter()
         .map(|(addr, stake)| {
             (
@@ -198,20 +228,7 @@ pub fn migrate_stakers(
         .collect();
 
     // the amount of LP tokens we are migrating in this message
-    let mut batch_lp: Uint128 = staker_lps.iter().map(|(_, x)| x).sum();
-
-    // if this is the last batch, we give any leftover to the migrator
-    if staker_lps.len() < limit as usize {
-        let balance = cw20::Cw20Contract(config.lp_token.clone())
-            .balance(&deps.querier, env.contract.address)?;
-        // add migrator for any leftover
-        let remainder = balance - batch_lp;
-        if !remainder.is_zero() {
-            staker_lps.push((migration.migrator.to_string(), remainder));
-        }
-        // increase batch amount to include remainder
-        batch_lp = balance;
-    }
+    let batch_lp: Uint128 = staker_lps.iter().map(|(_, x)| x).sum();
 
     // bonding has full info on who receives the delegation
     let bond_msg = wyndex_stake::msg::ReceiveDelegationMsg::MassDelegate {
@@ -289,6 +306,8 @@ fn prepare_denom_deposits(
     let mut funds = vec![];
     prepare_denom_deposit(destination, &assets[0], &mut msgs, &mut funds)?;
     prepare_denom_deposit(destination, &assets[1], &mut msgs, &mut funds)?;
+    // sort denoms for deposit
+    funds.sort_by(|coin1, coin2| coin1.denom.cmp(&coin2.denom));
     Ok((msgs, funds))
 }
 
@@ -357,32 +376,14 @@ fn to_wyndex_asset(
 pub fn reply_two(deps: DepsMut, env: Env) -> Result<Response, ContractError> {
     // load config for LP token and staking contract
     let mut migration = MIGRATION.load(deps.storage)?;
-    let pool = DESTINATION.load(deps.storage)?;
-    let wyndex::pair::PairInfo {
-        liquidity_token,
-        staking_addr,
-        ..
-    } = deps
-        .querier
-        .query_wasm_smart(&pool, &wyndex::pair::QueryMsg::Pair {})?;
+    let config = migration.migrate_stakers_config.as_mut().unwrap();
 
     // how many LP do we have total
-    let lp_token = cw20::Cw20Contract(liquidity_token);
+    let lp_token = cw20::Cw20Contract(config.lp_token.clone());
     let total_lp_tokens = lp_token.balance(&deps.querier, &env.contract.address)?;
 
-    // get total count to help normalize how many new shares they get
-    let total_staked = find_stakers(deps.as_ref(), None)?
-        .into_iter()
-        .map(|(_, v)| v)
-        .sum();
-
     // store this for `migrate_stakers` to use
-    migration.migrate_stakers_config = Some(MigrateStakersConfig {
-        lp_token: lp_token.0,
-        staking_addr,
-        total_lp_tokens,
-        total_staked,
-    });
+    config.total_lp_tokens = total_lp_tokens;
     MIGRATION.save(deps.storage, &migration)?;
 
     Ok(Response::new())
@@ -416,4 +417,82 @@ fn remove_stakers<'a>(
         stake_cw20::state::STAKED_BALANCES.remove(deps.storage, staker, env.block.height)?;
     }
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use cosmwasm_std::coin;
+
+    #[test]
+    fn prepare_denom_deposits_sorted() {
+        let destination = Addr::unchecked("destination");
+        let assets = vec![
+            Asset {
+                info: AssetInfo::Native("uusdc".to_owned()),
+                amount: Uint128::new(9_000_000_000u128),
+            },
+            Asset {
+                info: AssetInfo::Native("ujuno".to_owned()),
+                amount: Uint128::new(5_000_000_000u128),
+            },
+        ];
+
+        let (_, rcoins) = prepare_denom_deposits(&destination, &assets).unwrap();
+        assert_eq!(
+            rcoins,
+            vec![
+                coin(5_000_000_000u128, "ujuno".to_owned()),
+                coin(9_000_000_000u128, "uusdc".to_owned())
+            ]
+        );
+
+        let assets = vec![
+            Asset {
+                info: AssetInfo::Native("uusdc".to_owned()),
+                amount: Uint128::new(9_000_000_000u128),
+            },
+            Asset {
+                info: AssetInfo::Native(
+                    "ibc/0C1FFD27A01B116F10F0BC624A6A24190BC9C57B27837E23E3B43C34A193967C"
+                        .to_owned(),
+                ),
+                amount: Uint128::new(1_000_000_000u128),
+            },
+        ];
+        let (_, rcoins) = prepare_denom_deposits(&destination, &assets).unwrap();
+        assert_eq!(
+            rcoins,
+            vec![
+                coin(
+                    1_000_000_000u128,
+                    "ibc/0C1FFD27A01B116F10F0BC624A6A24190BC9C57B27837E23E3B43C34A193967C"
+                        .to_owned()
+                ),
+                coin(9_000_000_000u128, "uusdc".to_owned())
+            ]
+        );
+
+        let assets = vec![
+            Asset {
+                info: AssetInfo::Token("juno1wynd".to_owned()),
+                amount: Uint128::new(69_000_000_000u128),
+            },
+            Asset {
+                info: AssetInfo::Native(
+                    "ibc/0C1FFD27A01B116F10F0BC624A6A24190BC9C57B27837E23E3B43C34A193967C"
+                        .to_owned(),
+                ),
+                amount: Uint128::new(1_000_000_000u128),
+            },
+        ];
+        let (_, rcoins) = prepare_denom_deposits(&destination, &assets).unwrap();
+        assert_eq!(
+            rcoins,
+            vec![coin(
+                1_000_000_000u128,
+                "ibc/0C1FFD27A01B116F10F0BC624A6A24190BC9C57B27837E23E3B43C34A193967C".to_owned()
+            ),]
+        );
+    }
 }

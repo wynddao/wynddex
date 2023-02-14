@@ -9,7 +9,7 @@ use wyndex::factory::{
 use wyndex::fee_config::FeeConfig;
 use wyndex::pair::PairInfo;
 
-use crate::msg::{MigrateMsg, QueryMsg};
+use crate::msg::{MigrateMsg, OrigMigrateMsg, QueryMsg};
 use cosmwasm_std::{coin, to_binary, Addr, Coin, Decimal, Uint128};
 use cw20_base::msg::InstantiateMsg as Cw20BaseInstantiateMsg;
 use cw_multi_test::{next_block, App, AppResponse, BankSudo, ContractWrapper, Executor, SudoMsg};
@@ -415,6 +415,51 @@ impl Suite {
             .map_err(Into::into)
     }
 
+    // Like `migrate_tokens`, but after the first migration (from junoswap),
+    // it migrates to a newer version of this contract
+    pub fn migrate_tokens_with_self_upgrade(
+        &mut self,
+        migrator: Option<Addr>,
+        wyndex_pair_migrate: Option<Addr>,
+        wyndex_pair: Option<Addr>,
+    ) -> AnyResult<AppResponse> {
+        // first set up the migration
+        self.app.migrate_contract(
+            self.owner.clone(),
+            self.junoswap_staking_contract.clone(),
+            &MigrateMsg {
+                init: Some(OrigMigrateMsg {
+                    migrator: migrator.unwrap_or_else(|| self.owner.clone()).to_string(),
+                    unbonding_period: self.migration_unbonding_period(),
+                    junoswap_pool: self.junoswap_pool_contract.to_string(),
+                    factory: self.factory_contract.to_string(),
+                    wynddex_pool: wyndex_pair_migrate.map(|p| p.to_string()),
+                }),
+            },
+            self.migrator_code_id,
+        )?;
+
+        // then migrate again (self-migrate)
+        self.app.migrate_contract(
+            self.owner.clone(),
+            self.junoswap_staking_contract.clone(),
+            &MigrateMsg { init: None },
+            self.migrator_code_id,
+        )?;
+
+        // then trigger the actual migration
+        self.app.execute_contract(
+            self.owner.clone(),
+            self.junoswap_staking_contract.clone(),
+            &crate::msg::ExecuteMsg::MigrateTokens {
+                wynddex_pool: wyndex_pair
+                    .unwrap_or_else(|| self.wyndex_pair_contract.clone())
+                    .to_string(),
+            },
+            &[],
+        )
+    }
+
     /// Migrates the junoswap staking contract to our migration contract and migrates the tokens
     pub fn migrate_tokens(
         &mut self,
@@ -427,11 +472,13 @@ impl Suite {
             self.owner.clone(),
             self.junoswap_staking_contract.clone(),
             &MigrateMsg {
-                migrator: migrator.unwrap_or_else(|| self.owner.clone()).to_string(),
-                unbonding_period: self.migration_unbonding_period(),
-                junoswap_pool: self.junoswap_pool_contract.to_string(),
-                factory: self.factory_contract.to_string(),
-                wynddex_pool: wyndex_pair_migrate.map(|p| p.to_string()),
+                init: Some(OrigMigrateMsg {
+                    migrator: migrator.unwrap_or_else(|| self.owner.clone()).to_string(),
+                    unbonding_period: self.migration_unbonding_period(),
+                    junoswap_pool: self.junoswap_pool_contract.to_string(),
+                    factory: self.factory_contract.to_string(),
+                    wynddex_pool: wyndex_pair_migrate.map(|p| p.to_string()),
+                }),
             },
             self.migrator_code_id,
         )?;

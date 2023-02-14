@@ -70,7 +70,9 @@ fn partial_migration() {
     }
 
     // migrate the tokens
-    suite.migrate_tokens(None, None, None).unwrap();
+    suite
+        .migrate_tokens_with_self_upgrade(None, None, None)
+        .unwrap();
 
     assert!(
         !suite.migration_finished().unwrap(),

@@ -25,6 +25,12 @@ pub enum ExecuteMsg {
         /// multiplier, unbonding_period needs to be passed in unbond as well
         unbonding_period: u64,
     },
+    /// Will immediately unbond all tokens for the given addresses.
+    /// Can only be called by the `unbonder` account.
+    QuickUnbond {
+        /// The addresses of the stakers that should be unbonded
+        stakers: Vec<String>,
+    },
     /// Claim is used to claim your native tokens that you previously "unbonded"
     /// after the contract-defined waiting period (eg. 1 week)
     Claim {},
@@ -159,6 +165,12 @@ pub enum QueryMsg {
     /// Returns withdraw adjustment data
     #[returns(WithdrawAdjustmentDataResponse)]
     WithdrawAdjustmentData { addr: String, asset: AssetInfo },
+}
+
+#[cw_serde]
+pub struct MigrateMsg {
+    /// Address of the account that can call [`ExecuteMsg::QuickUnbond`]
+    pub unbonder: Option<String>,
 }
 
 #[cw_serde]
