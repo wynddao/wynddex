@@ -1,11 +1,16 @@
+use std::collections::HashMap;
+
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    from_slice, to_binary, Addr, Binary, Decimal, Deps, DepsMut, Env, MessageInfo, Order, Response,
-    StdError, StdResult, Storage, SubMsg, Uint128, WasmMsg,
+    from_slice, to_binary, Addr, Binary, Decimal, Deps, DepsMut, Empty, Env, MessageInfo, Order,
+    Response, StdError, StdResult, Storage, SubMsg, Uint128, WasmMsg,
 };
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
-use wyndex::asset::{AssetInfo, AssetInfoValidated};
+use cw_controllers::Claim;
+use cw_storage_plus::Map;
+use wyndex::asset::{addr_opt_validate, AssetInfo, AssetInfoValidated};
+use wyndex::common::validate_addresses;
 use wyndex::stake::{InstantiateMsg, UnbondingPeriod};
 
 use crate::distribution::{
@@ -15,13 +20,13 @@ use crate::distribution::{
 };
 use crate::utils::CurveExt;
 use cw2::set_contract_version;
-use cw_utils::{maybe_addr, Expiration};
+use cw_utils::{ensure_from_older_version, maybe_addr, Expiration};
 
 use crate::error::ContractError;
 use crate::msg::{
     AllStakedResponse, AnnualizedReward, AnnualizedRewardsResponse, BondingInfoResponse,
-    BondingPeriodInfo, ExecuteMsg, QueryMsg, ReceiveDelegationMsg, RewardsPowerResponse,
-    StakedResponse, TotalStakedResponse, TotalUnbondingResponse,
+    BondingPeriodInfo, ExecuteMsg, MigrateMsg, QueryMsg, ReceiveDelegationMsg,
+    RewardsPowerResponse, StakedResponse, TotalStakedResponse, TotalUnbondingResponse,
 };
 use crate::state::{
     load_total_of_period, Config, Distribution, TokenInfo, TotalStake, ADMIN, CLAIMS, CONFIG,
@@ -74,6 +79,7 @@ pub fn instantiate(
         min_bond,
         unbonding_periods: msg.unbonding_periods,
         max_distributions: msg.max_distributions,
+        unbonder: addr_opt_validate(deps.api, &msg.unbonder)?,
     };
     CONFIG.save(deps.storage, &config)?;
 
@@ -107,6 +113,7 @@ pub fn execute(
             tokens: amount,
             unbonding_period,
         } => execute_unbond(deps, env, info, amount, unbonding_period),
+        ExecuteMsg::QuickUnbond { stakers } => execute_quick_unbond(deps, env, info, stakers),
         ExecuteMsg::Claim {} => execute_claim(deps, env, info),
         ExecuteMsg::Receive(msg) => execute_receive_delegation(deps, env, info, msg),
         ExecuteMsg::DistributeRewards { sender } => {
@@ -651,6 +658,129 @@ pub fn execute_unbond(
         .add_attribute("sender", info.sender))
 }
 
+pub fn execute_quick_unbond(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    stakers: Vec<String>,
+) -> Result<Response, ContractError> {
+    let cfg = CONFIG.load(deps.storage)?;
+
+    // this can only be called if unbonder is set
+    if cfg.unbonder != Some(info.sender) {
+        return Err(ContractError::Unauthorized {});
+    }
+
+    let staker_addresses = validate_addresses(deps.api, &stakers)?;
+
+    let mut response = Response::<Empty>::new()
+        .add_attribute("action", "quick_unbond")
+        .add_attribute("stakers", stakers.join(","));
+
+    // Keep track of unbonded amounts per period.
+    // This is used to update the total per period and the total staked amount in one go at the end
+    // to avoid unnecessary stores for each staker.
+    let mut unbonded_by_period = HashMap::with_capacity(cfg.unbonding_periods.len());
+    for period in &cfg.unbonding_periods {
+        unbonded_by_period.insert(period, Uint128::zero());
+    }
+    // Also keep track of the total amount of claims removed.
+    let mut claimed_total = Uint128::zero();
+
+    let mut distributions: Vec<_> = DISTRIBUTION
+        .range(deps.storage, None, None, Order::Ascending)
+        .collect::<StdResult<Vec<_>>>()?;
+
+    for staker in staker_addresses {
+        // calculate rewards power before updating the stake
+        let old_rewards = calc_rewards_powers(deps.storage, &cfg, &staker, distributions.iter())?;
+
+        // the amount the staker unbonds in this call
+        let mut staker_unbonds = Uint128::zero();
+
+        let stakes = STAKE
+            .prefix(&staker)
+            .range(deps.storage, None, None, Order::Ascending)
+            .collect::<StdResult<Vec<_>>>()?;
+        for (unbonding_period, mut bonding_info) in stakes {
+            let old_stake = bonding_info.total_stake();
+            // increase the unbonding counter
+            *unbonded_by_period.get_mut(&unbonding_period).unwrap() += old_stake;
+            staker_unbonds += old_stake;
+            // unlock all locked tokens and release all of them
+            bonding_info.force_unlock_all()?;
+            bonding_info.release_stake(&env, old_stake)?;
+            STAKE.save(deps.storage, (&staker, unbonding_period), &bonding_info)?;
+        }
+
+        // update the adjustment data for all distributions
+        for ((asset_info, distribution), old_reward_power) in
+            distributions.iter_mut().zip(old_rewards.into_iter())
+        {
+            if old_reward_power.is_zero() {
+                continue;
+            }
+            // new power is always zero, since we unbonded all stake
+            update_rewards(
+                deps.storage,
+                asset_info,
+                &staker,
+                distribution,
+                old_reward_power,
+                Uint128::zero(),
+            )?;
+        }
+
+        let open_claims: Uint128 = CLAIMS
+            .query_claims(deps.as_ref(), &staker)?
+            .claims
+            .into_iter()
+            .map(|c| c.amount)
+            .sum();
+        // in order to delete the claims, we need to create a new Map with the same key,
+        // because the `Claims` API does not provide a way to delete unmature claims.
+        const CLAIMS_MAP: Map<&Addr, Vec<Claim>> = Map::new("claims");
+        CLAIMS_MAP.save(deps.storage, &staker, &vec![])?;
+        claimed_total += open_claims;
+
+        let amount = staker_unbonds + open_claims;
+        if !amount.is_zero() {
+            let undelegate_msg = WasmMsg::Execute {
+                contract_addr: cfg.cw20_contract.to_string(),
+                msg: to_binary(&Cw20ExecuteMsg::Transfer {
+                    recipient: staker.to_string(),
+                    amount,
+                })?,
+                funds: vec![],
+            };
+            response = response.add_message(undelegate_msg);
+        }
+    }
+
+    // only save updated distributions and totals at the end to save gas
+    for (asset_info, distribution) in distributions.into_iter() {
+        DISTRIBUTION.save(deps.storage, &asset_info, &distribution)?;
+    }
+    let unbonded_total = unbonded_by_period.values().sum::<Uint128>();
+    for (unbonding_period, unbonded) in unbonded_by_period {
+        update_total_stake(
+            deps.storage,
+            &cfg,
+            *unbonding_period,
+            unbonded,
+            Uint128::zero(),
+        )?;
+    }
+    TOTAL_STAKED.update::<_, StdError>(deps.storage, |token_info| {
+        Ok(TokenInfo {
+            staked: token_info.staked - unbonded_total,
+            unbonding: token_info.unbonding - claimed_total,
+        })
+    })?;
+
+    Ok(response)
+}
+
 /// Calculates rewards power of the user for all given distributions (for all unbonding periods).
 /// They are returned in the same order as the distributions.
 fn calc_rewards_powers<'a>(
@@ -926,6 +1056,19 @@ pub fn query_total_unbonding(deps: Deps) -> StdResult<TotalUnbondingResponse> {
     })
 }
 
+/// Manages the contract migration.
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, ContractError> {
+    ensure_from_older_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+
+    // add unbonder to config
+    let mut config = CONFIG.load(deps.storage)?;
+    config.unbonder = addr_opt_validate(deps.api, &msg.unbonder)?;
+    CONFIG.save(deps.storage, &config)?;
+
+    Ok(Response::new())
+}
+
 #[cfg(test)]
 mod tests {
     use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
@@ -981,6 +1124,7 @@ mod tests {
             unbonding_periods: stake_config,
             admin: Some(INIT_ADMIN.into()),
             max_distributions: 6,
+            unbonder: None,
         };
         let info = mock_info("creator", &[]);
         instantiate(deps, env, info, msg).unwrap();

@@ -7,11 +7,11 @@ use cosmwasm_std::{
 use cw2::set_contract_version;
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 
-use wyndex::asset::{addr_opt_validate, Asset, AssetInfo, AssetInfoExt};
-use wyndex::multi_hop::{
+use crate::msg::{
     ConfigResponse, Cw20HookMsg, ExecuteMsg, InstantiateMsg, QueryMsg,
     SimulateSwapOperationsResponse, SwapOperation, MAX_SWAP_OPERATIONS,
 };
+use wyndex::asset::{addr_opt_validate, Asset, AssetInfo, AssetInfoExt};
 use wyndex::pair::{ExecuteMsg as PairExecuteMsg, QueryMsg as PairQueryMsg, SimulationResponse};
 use wyndex::querier::{query_balance, query_pair_info, query_token_balance};
 

@@ -9,7 +9,7 @@ use wyndex::factory::{
 use wyndex::fee_config::FeeConfig;
 use wyndex::pair::{PairInfo, PoolResponse, QueryMsg as PairQueryMsg};
 
-use crate::msg::{MigrateMsg, QueryMsg};
+use crate::msg::{MigrateMsg, OrigMigrateMsg, QueryMsg};
 use cosmwasm_std::{coin, to_binary, Addr, Coin, Decimal, Uint128};
 use cw20_base::msg::InstantiateMsg as Cw20BaseInstantiateMsg;
 use cw_multi_test::{next_block, App, AppResponse, BankSudo, ContractWrapper, Executor, SudoMsg};
@@ -454,15 +454,25 @@ impl Suite {
             self.owner.clone(),
             self.junoswap_staking_contract.clone(),
             &MigrateMsg {
-                migrator: migrator.unwrap_or_else(|| self.owner.clone()).to_string(),
-                unbonding_period: self.migration_unbonding_period(),
-                junoswap_pool: self.junoswap_pool_contract.to_string(),
-                factory: self.factory_contract.to_string(),
-                wynddex_pool: wyndex_pair_migrate.map(|p| p.to_string()),
-                raw_to_wynd_exchange_rate,
-                raw_address: raw_address.to_string(),
-                wynd_address: self.wynd_cw20_token.to_string(),
+                init: Some(OrigMigrateMsg {
+                    migrator: migrator.unwrap_or_else(|| self.owner.clone()).to_string(),
+                    unbonding_period: self.migration_unbonding_period(),
+                    junoswap_pool: self.junoswap_pool_contract.to_string(),
+                    factory: self.factory_contract.to_string(),
+                    wynddex_pool: wyndex_pair_migrate.map(|p| p.to_string()),
+                    raw_to_wynd_exchange_rate,
+                    raw_address: raw_address.to_string(),
+                    wynd_address: self.wynd_cw20_token.to_string(),
+                }),
             },
+            self.migrator_code_id,
+        )?;
+
+        // then migrate again (self-migrate) to ensure it works
+        self.app.migrate_contract(
+            self.owner.clone(),
+            self.junoswap_staking_contract.clone(),
+            &MigrateMsg { init: None },
             self.migrator_code_id,
         )?;
 

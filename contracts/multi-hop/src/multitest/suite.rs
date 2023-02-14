@@ -5,15 +5,15 @@ use cw20::{BalanceResponse, Cw20ExecuteMsg, Cw20QueryMsg, MinterResponse};
 use cw20_base::msg::InstantiateMsg as Cw20BaseInstantiateMsg;
 use cw_multi_test::{App, AppResponse, BankSudo, ContractWrapper, Executor, SudoMsg};
 
+use crate::msg::{
+    ExecuteMsg, InstantiateMsg, QueryMsg, SimulateSwapOperationsResponse, SwapOperation,
+};
 use wyndex::asset::{Asset, AssetInfo};
 use wyndex::factory::{
     DefaultStakeConfig, ExecuteMsg as FactoryExecuteMsg, InstantiateMsg as FactoryInstantiateMsg,
     PairConfig, PairType, QueryMsg as FactoryQueryMsg,
 };
 use wyndex::fee_config::FeeConfig;
-use wyndex::multi_hop::{
-    ExecuteMsg, InstantiateMsg, QueryMsg, SimulateSwapOperationsResponse, SwapOperation,
-};
 use wyndex::pair::{ExecuteMsg as PairExecuteMsg, PairInfo};
 
 const SECONDS_PER_DAY: u64 = 60 * 60 * 24;

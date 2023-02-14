@@ -15,6 +15,14 @@ pub enum QueryMsg {
 /// For existing contract, we need to specify which pool it can be withdrawn into
 #[cw_serde]
 pub struct MigrateMsg {
+    /// This must be Some the first migration (from JunoSwap contracts).
+    /// This must be None if upgrading from raw-migration to raw-migration
+    pub init: Option<OrigMigrateMsg>,
+}
+
+/// For existing contract, we need to specify which pool it can be withdrawn into
+#[cw_serde]
+pub struct OrigMigrateMsg {
     /// This is the address that can run ExecuteMsg::MigrateTokens
     pub migrator: String,
     /// This is how long it will be staked on WYND DEX

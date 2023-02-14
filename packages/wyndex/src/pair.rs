@@ -152,6 +152,7 @@ impl StakeConfig {
                 unbonding_periods: self.unbonding_periods,
                 max_distributions: self.max_distributions,
                 admin: Some(factory_addr),
+                unbonder: None, // TODO: allow specifying unbonder
             })?,
             funds: vec![],
             admin: Some(factory_owner),
