@@ -40,3 +40,6 @@ cosmwasm-schema = { workspace = true }
 # standard libs
 anyhow = { workspace = true }
 test-case = { workspace = true }
+
+# hotfix for canlab migration
+wyndex-stake-v112 = { package = "wyndex-stake", git = "https://github.com/cosmorama/wynddex", tag = "v1.1.2" }

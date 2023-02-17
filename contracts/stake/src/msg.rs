@@ -169,8 +169,7 @@ pub enum QueryMsg {
 
 #[cw_serde]
 pub struct MigrateMsg {
-    /// Address of the account that can call [`ExecuteMsg::QuickUnbond`]
-    pub unbonder: Option<String>,
+    pub canlab_token_contract: String,
 }
 
 #[cw_serde]

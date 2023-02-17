@@ -20,7 +20,7 @@ use crate::distribution::{
 };
 use crate::utils::CurveExt;
 use cw2::set_contract_version;
-use cw_utils::{ensure_from_older_version, maybe_addr, Expiration};
+use cw_utils::{maybe_addr, Expiration};
 
 use crate::error::ContractError;
 use crate::msg::{
@@ -1058,13 +1058,27 @@ pub fn query_total_unbonding(deps: Deps) -> StdResult<TotalUnbondingResponse> {
 
 /// Manages the contract migration.
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, ContractError> {
-    ensure_from_older_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-
-    // add unbonder to config
-    let mut config = CONFIG.load(deps.storage)?;
-    config.unbonder = addr_opt_validate(deps.api, &msg.unbonder)?;
-    CONFIG.save(deps.storage, &config)?;
+pub fn migrate(deps: DepsMut, env: Env, msg: MigrateMsg) -> Result<Response, ContractError> {
+    let canlab_coin =
+        AssetInfoValidated::Token(deps.api.addr_validate(&msg.canlab_token_contract)?);
+    let canlab_reward_curve = REWARD_CURVE.load(deps.storage, &canlab_coin)?;
+    match canlab_reward_curve {
+        // Because of ommision, incorrect curve was passed - with actual timestamp instead of
+        // relative one
+        Curve::SaturatingLinear(mut satlin) => {
+            satlin.min_x = env.block.time.seconds();
+            satlin.max_x = 3600 * 24 * 365 + env.block.time.seconds(); // we want this distribution to run through whole year
+            REWARD_CURVE.save(deps.storage, &canlab_coin, &Curve::SaturatingLinear(satlin))?;
+        }
+        _ => {
+            return Err(StdError::GenericErr {
+                msg:
+                    "Wrong! This contract doesn't have saturating linear reward distribution curve"
+                        .to_owned(),
+            }
+            .into());
+        }
+    }
 
     Ok(Response::new())
 }

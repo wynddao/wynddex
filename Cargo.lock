@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "cw-placeholder"
-version = "1.1.2"
+version = "1.1.2-canlab"
 dependencies = [
  "cosmwasm-schema",
  "cosmwasm-std",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "cw-splitter"
-version = "1.1.2"
+version = "1.1.2-canlab"
 dependencies = [
  "cosmwasm-schema",
  "cosmwasm-std",
@@ -645,7 +645,7 @@ checksum = "c8cbd1169bd7b4a0a20d92b9af7a7e0422888bd38a6f5ec29c1fd8c1558a272e"
 
 [[package]]
 name = "gauge-adapter"
-version = "1.1.2"
+version = "1.1.2-canlab"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -658,11 +658,11 @@ dependencies = [
  "cw20-base 1.0.1",
  "thiserror",
  "wynd-utils",
- "wyndex",
+ "wyndex 1.1.2-canlab",
  "wyndex-factory",
  "wyndex-pair",
  "wyndex-pair-stable",
- "wyndex-stake",
+ "wyndex-stake 1.1.2-canlab",
 ]
 
 [[package]]
@@ -756,7 +756,7 @@ checksum = "fad582f4b9e86b6caa621cabeb0963332d92eea04729ab12892c2533951e6440"
 
 [[package]]
 name = "junoswap-staking"
-version = "1.1.2"
+version = "1.1.2-canlab"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -774,10 +774,10 @@ dependencies = [
  "stake-cw20",
  "thiserror",
  "wasmswap",
- "wyndex",
+ "wyndex 1.1.2-canlab",
  "wyndex-factory",
  "wyndex-pair",
- "wyndex-stake",
+ "wyndex-stake 1.1.2-canlab",
 ]
 
 [[package]]
@@ -806,7 +806,7 @@ checksum = "201de327520df007757c1f0adce6e827fe8562fbc28bfd9c15571c66ca1f5f79"
 
 [[package]]
 name = "nominated-trader"
-version = "1.1.2"
+version = "1.1.2-canlab"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -818,12 +818,12 @@ dependencies = [
  "cw20 1.0.1",
  "cw20-base 1.0.1",
  "thiserror",
- "wyndex",
+ "wyndex 1.1.2-canlab",
  "wyndex-factory",
  "wyndex-multi-hop",
  "wyndex-pair",
  "wyndex-pair-stable",
- "wyndex-stake",
+ "wyndex-stake 1.1.2-canlab",
 ]
 
 [[package]]
@@ -1013,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "raw-migration"
-version = "1.1.2"
+version = "1.1.2-canlab"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -1031,10 +1031,10 @@ dependencies = [
  "stake-cw20",
  "thiserror",
  "wasmswap",
- "wyndex",
+ "wyndex 1.1.2-canlab",
  "wyndex-factory",
  "wyndex-pair",
- "wyndex-stake",
+ "wyndex-stake 1.1.2-canlab",
 ]
 
 [[package]]
@@ -1326,11 +1326,11 @@ dependencies = [
  "cw-multi-test",
  "cw20 1.0.1",
  "cw20-base 1.0.1",
- "wyndex",
+ "wyndex 1.1.2-canlab",
  "wyndex-factory",
  "wyndex-multi-hop",
  "wyndex-pair",
- "wyndex-stake",
+ "wyndex-stake 1.1.2-canlab",
 ]
 
 [[package]]
@@ -1456,7 +1456,23 @@ dependencies = [
 
 [[package]]
 name = "wyndex"
+version = "1.1.2-canlab"
+dependencies = [
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw-storage-plus 1.0.1",
+ "cw-utils 1.0.1",
+ "cw20 1.0.1",
+ "cw20-base 1.0.1",
+ "itertools 0.10.5",
+ "thiserror",
+ "uint",
+]
+
+[[package]]
+name = "wyndex"
 version = "1.1.2"
+source = "git+https://github.com/cosmorama/wynddex?tag=v1.1.2#acca3311673d9d7c990a88d910f4a03a9acf25fd"
 dependencies = [
  "cosmwasm-schema",
  "cosmwasm-std",
@@ -1471,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "wyndex-factory"
-version = "1.1.2"
+version = "1.1.2-canlab"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -1485,14 +1501,14 @@ dependencies = [
  "cw20-base 1.0.1",
  "itertools 0.10.5",
  "thiserror",
- "wyndex",
+ "wyndex 1.1.2-canlab",
  "wyndex-pair",
- "wyndex-stake",
+ "wyndex-stake 1.1.2-canlab",
 ]
 
 [[package]]
 name = "wyndex-multi-hop"
-version = "1.1.2"
+version = "1.1.2-canlab"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -1503,15 +1519,15 @@ dependencies = [
  "cw20 1.0.1",
  "cw20-base 1.0.1",
  "thiserror",
- "wyndex",
+ "wyndex 1.1.2-canlab",
  "wyndex-factory",
  "wyndex-pair",
- "wyndex-stake",
+ "wyndex-stake 1.1.2-canlab",
 ]
 
 [[package]]
 name = "wyndex-pair"
-version = "1.1.2"
+version = "1.1.2-canlab"
 dependencies = [
  "cosmwasm-schema",
  "cosmwasm-std",
@@ -1522,14 +1538,14 @@ dependencies = [
  "cw20 1.0.1",
  "cw20-base 1.0.1",
  "proptest",
- "wyndex",
+ "wyndex 1.1.2-canlab",
  "wyndex-factory",
- "wyndex-stake",
+ "wyndex-stake 1.1.2-canlab",
 ]
 
 [[package]]
 name = "wyndex-pair-stable"
-version = "1.1.2"
+version = "1.1.2-canlab"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -1543,14 +1559,14 @@ dependencies = [
  "derivative 0.3.1",
  "itertools 0.10.5",
  "proptest",
- "wyndex",
+ "wyndex 1.1.2-canlab",
  "wyndex-factory",
- "wyndex-stake",
+ "wyndex-stake 1.1.2-canlab",
 ]
 
 [[package]]
 name = "wyndex-stake"
-version = "1.1.2"
+version = "1.1.2-canlab"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -1566,7 +1582,26 @@ dependencies = [
  "test-case",
  "thiserror",
  "wynd-utils",
- "wyndex",
+ "wyndex 1.1.2-canlab",
+ "wyndex-stake 1.1.2",
+]
+
+[[package]]
+name = "wyndex-stake"
+version = "1.1.2"
+source = "git+https://github.com/cosmorama/wynddex?tag=v1.1.2#acca3311673d9d7c990a88d910f4a03a9acf25fd"
+dependencies = [
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw-controllers 1.0.1",
+ "cw-storage-plus 1.0.1",
+ "cw-utils 1.0.1",
+ "cw2 1.0.1",
+ "cw20 1.0.1",
+ "serde",
+ "thiserror",
+ "wynd-utils",
+ "wyndex 1.1.2",
 ]
 
 [[package]]
