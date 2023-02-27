@@ -29,8 +29,8 @@ use crate::msg::{
     RewardsPowerResponse, StakedResponse, TotalStakedResponse, TotalUnbondingResponse,
 };
 use crate::state::{
-    load_total_of_period, Config, Distribution, TokenInfo, TotalStake, ADMIN, CLAIMS, CONFIG,
-    DISTRIBUTION, REWARD_CURVE, STAKE, TOTAL_PER_PERIOD, TOTAL_STAKED,
+    Config, Distribution, TokenInfo, TotalStake, ADMIN, CLAIMS, CONFIG, DISTRIBUTION, REWARD_CURVE,
+    STAKE, TOTAL_PER_PERIOD, TOTAL_STAKED,
 };
 use wynd_curve_utils::Curve;
 
@@ -893,52 +893,118 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     }
 }
 
+// this is all the info we need below
+struct DistStats {
+    asset: AssetInfoValidated,
+    /// The total rewards power in the distribution
+    total_rewards: Uint128,
+    reward_multipliers: Vec<(UnbondingPeriod, Decimal)>,
+    /// The amount of tokens that will (probably) be distributed by this distribution within the next year
+    annualized_payout: Decimal,
+}
+
 fn query_annualized_rewards(deps: Deps, env: Env) -> StdResult<AnnualizedRewardsResponse> {
+    let config = CONFIG.load(deps.storage)?;
+    let now = env.block.time.seconds();
+
+    // reward info for each distribution flow... do all the heavy calcs per distribution once.
+    // we can then just read this for each unbonding period
     let distributions = DISTRIBUTION
         .range(deps.storage, None, None, Order::Ascending)
+        .map(|r| {
+            let (asset, d) = r?;
+            let total_rewards = d.total_rewards_power(deps.storage, &config);
+            let reward_multipliers = d.reward_multipliers;
+
+            let reward_curve = REWARD_CURVE.may_load(deps.storage, &asset)?;
+            let annualized_payout = calculate_annualized_payout(reward_curve, now);
+
+            Ok(DistStats {
+                asset,
+                total_rewards,
+                reward_multipliers,
+                annualized_payout,
+            })
+        })
         .collect::<StdResult<Vec<_>>>()?;
-    let config = CONFIG.load(deps.storage)?;
 
     let mut aprs = Vec::with_capacity(config.unbonding_periods.len());
 
     for &unbonding_period in &config.unbonding_periods {
         let mut rewards = Vec::with_capacity(distributions.len());
-        for (asset_info, dist) in &distributions {
-            let total_stake = load_total_of_period(deps.storage, unbonding_period)
-                .unwrap()
-                .powered_stake;
-            let total_power = dist.total_rewards_power(deps.storage, &config);
-
-            if total_stake.is_zero() || total_power.is_zero() {
+        for stats in &distributions {
+            if stats.total_rewards.is_zero() {
                 rewards.push(AnnualizedReward {
-                    info: asset_info.clone(),
+                    info: stats.asset.clone(),
                     amount: None,
                 });
                 continue;
             }
 
-            let power_of_period = dist
-                .total_rewards_power_of_period(deps.storage, &config, unbonding_period)
-                .unwrap();
-
-            let reward_curve = REWARD_CURVE.load(deps.storage, asset_info)?;
-
-            let rewards_per_year = (reward_curve.value(env.block.time.seconds())
-                + reward_curve.value(env.block.time.seconds() + SECONDS_PER_YEAR))
-                * Uint128::from(SECONDS_PER_YEAR).checked_div(Uint128::from(100u128))?;
-
-            let period_rewards =
-                Decimal::from_ratio(rewards_per_year * power_of_period, total_power);
-            let rewards_per_token = period_rewards / total_stake;
+            // we want basically, typical reward payout times the multiplier of this unbonding period
+            // multiplier * annualized payout / total points
+            let multiplier: Decimal = stats
+                .reward_multipliers
+                .iter()
+                .find(|(ub, _)| ub == &unbonding_period)
+                .unwrap()
+                .1;
+            // normalize by tokens_per_power
+            let annual_rewards = (multiplier * stats.annualized_payout)
+                / (stats.total_rewards * config.tokens_per_power);
 
             rewards.push(AnnualizedReward {
-                info: asset_info.clone(),
-                amount: Some(rewards_per_token),
+                info: stats.asset.clone(),
+                amount: Some(annual_rewards),
             });
         }
         aprs.push((unbonding_period, rewards));
     }
     Ok(AnnualizedRewardsResponse { rewards: aprs })
+}
+
+fn calculate_annualized_payout(reward_curve: Option<Curve>, now: u64) -> Decimal {
+    match reward_curve {
+        Some(c) => {
+            // look at the last timestamp in the rewards curve and extrapolate
+            match c.end() {
+                Some(last_timestamp) => {
+                    if last_timestamp <= now {
+                        return Decimal::zero();
+                    }
+                    let time_diff = last_timestamp - now;
+                    if time_diff >= SECONDS_PER_YEAR {
+                        // if the last timestamp is more than a year in the future,
+                        // we can just calculate the rewards for the whole year directly
+
+                        // formula: `(locked_now - locked_end)`
+                        Decimal::from_atomics(c.value(now) - c.value(now + SECONDS_PER_YEAR), 0)
+                            .expect("too many rewards")
+                    } else {
+                        // if the last timestamp is less than a year in the future,
+                        // we want to extrapolate the rewards for the whole year
+
+                        // formula: `(locked_now - locked_end) / time_diff * SECONDS_PER_YEAR`
+                        // `locked_now - locked_end` are the tokens freed up over the `time_diff`.
+                        // Dividing by that diff, gives us the rate of tokens per second,
+                        // which is then extrapolated to a whole year.
+                        // Because of the constraints put on `c` when setting it,
+                        // we know that `locked_end` is always 0, so we don't need to subtract it.
+                        Decimal::from_ratio(
+                            c.value(now) * Uint128::from(SECONDS_PER_YEAR),
+                            time_diff,
+                        )
+                    }
+                }
+                None => {
+                    // this case should only happen if the reward curve is freshly initialized
+                    // (i.e. no rewards have been scheduled yet)
+                    Decimal::zero()
+                }
+            }
+        }
+        None => Decimal::zero(),
+    }
 }
 
 fn query_rewards(deps: Deps, addr: String) -> StdResult<RewardsPowerResponse> {

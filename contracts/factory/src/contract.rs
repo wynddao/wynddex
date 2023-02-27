@@ -22,7 +22,8 @@ use wyndex::common::{
 };
 use wyndex::factory::{
     ConfigResponse, DistributionFlow, ExecuteMsg, FeeInfoResponse, InstantiateMsg, MigrateMsg,
-    PairConfig, PairType, PairsResponse, PartialStakeConfig, QueryMsg, ROUTE,
+    PairConfig, PairType, PairsResponse, PartialDefaultStakeConfig, PartialStakeConfig, QueryMsg,
+    ROUTE,
 };
 use wyndex_stake::msg::ExecuteMsg as StakeExecuteMsg;
 
@@ -104,6 +105,8 @@ pub struct UpdateConfig {
     fee_address: Option<String>,
     /// Whether only the owner or anyone can create new pairs
     only_owner_can_create_pairs: Option<bool>,
+    /// The default configuration for the staking contracts of new pairs
+    default_stake_config: Option<PartialDefaultStakeConfig>,
 }
 
 /// Exposes all the execute functions available in the contract.
@@ -146,6 +149,7 @@ pub fn execute(
             token_code_id,
             fee_address,
             only_owner_can_create_pairs,
+            default_stake_config,
         } => execute_update_config(
             deps,
             info,
@@ -153,6 +157,7 @@ pub fn execute(
                 token_code_id,
                 fee_address,
                 only_owner_can_create_pairs,
+                default_stake_config,
             },
         ),
         ExecuteMsg::UpdatePairFees {
@@ -177,7 +182,9 @@ pub fn execute(
             staking_config,
             Vec::new(),
         ),
-        ExecuteMsg::Deregister { asset_infos } => deregister(deps, info, asset_infos),
+        ExecuteMsg::Deregister { asset_infos } => {
+            deregister_pool_and_staking(deps, info, asset_infos)
+        }
         ExecuteMsg::ProposeNewOwner { owner, expires_in } => {
             let config = CONFIG.load(deps.storage)?;
 
@@ -339,6 +346,10 @@ pub fn execute_update_config(
 
     if let Some(only_owner) = param.only_owner_can_create_pairs {
         config.only_owner_can_create_pairs = only_owner;
+    }
+
+    if let Some(default_stake_config) = param.default_stake_config {
+        config.default_stake_config.update(default_stake_config);
     }
 
     CONFIG.save(deps.storage, &config)?;
@@ -579,10 +590,11 @@ pub mod reply {
 /// Removes an existing pair from the factory.
 ///
 /// * **asset_infos** is a vector with assets for which we deregister the pair.
+/// The LP Staking Contract will also be deregistered and does not need to be provided.
 ///
 /// ## Executor
 /// Only the owner can execute this.
-pub fn deregister(
+pub fn deregister_pool_and_staking(
     deps: DepsMut,
     info: MessageInfo,
     asset_infos: Vec<AssetInfo>,
@@ -601,6 +613,9 @@ pub fn deregister(
 
     let pair_addr = PAIRS.load(deps.storage, &pair_key(&asset_infos))?;
     PAIRS.remove(deps.storage, &pair_key(&asset_infos));
+    // keep track of staking address
+    let pair_info = query_pair_info(&deps.querier, &pair_addr)?;
+    STAKING_ADDRESSES.remove(deps.storage, &pair_info.staking_addr);
 
     for asset_info1 in &asset_infos {
         for asset_info2 in &asset_infos {

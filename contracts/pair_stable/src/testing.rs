@@ -1,4 +1,4 @@
-use crate::contract::{execute, instantiate};
+use crate::contract::{execute, instantiate, query};
 use crate::state::CONFIG;
 use wyndex::fee_config::FeeConfig;
 // TODO: Copied here just as a temporary measure
@@ -6,15 +6,16 @@ use crate::mock_querier::mock_dependencies;
 
 use cosmwasm_std::testing::{mock_env, mock_info, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
-    attr, to_binary, Addr, BankMsg, BlockInfo, Coin, CosmosMsg, Decimal, DepsMut, Env, ReplyOn,
-    Response, StdError, SubMsg, Timestamp, Uint128, WasmMsg,
+    attr, coin, from_binary, to_binary, Addr, BankMsg, BlockInfo, Coin, CosmosMsg, Decimal,
+    DepsMut, Env, ReplyOn, Response, StdError, SubMsg, Timestamp, Uint128, WasmMsg,
 };
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg, MinterResponse};
 use cw20_base::msg::InstantiateMsg as TokenInstantiateMsg;
 use cw_utils::MsgInstantiateContractResponse;
 use wyndex::asset::{Asset, AssetInfo, AssetInfoValidated};
 use wyndex::pair::{
-    ContractError, Cw20HookMsg, ExecuteMsg, InstantiateMsg, StablePoolParams, StakeConfig,
+    ContractError, Cw20HookMsg, ExecuteMsg, HistoricalPricesResponse, HistoryDuration,
+    InstantiateMsg, QueryMsg, StablePoolParams, StakeConfig,
 };
 
 fn mock_env_with_block_time(time: u64) -> Env {
@@ -619,6 +620,200 @@ fn withdraw_liquidity() {
     assert_eq!(
         log_refund_assets,
         &attr("refund_assets", "100uusd, 100asset0000")
+    );
+}
+
+#[test]
+fn query_historical() {
+    let mut deps = mock_dependencies(&[]);
+    let mut env = mock_env();
+
+    let user = "user";
+
+    // setup some cw20 tokens, so the queries don't fail
+    deps.querier.with_token_balances(&[
+        (
+            &"asset0000".into(),
+            &[(&MOCK_CONTRACT_ADDR.into(), &0u128.into())],
+        ),
+        (
+            &"liquidity0000".into(),
+            &[(&MOCK_CONTRACT_ADDR.into(), &0u128.into())],
+        ),
+    ]);
+
+    let uusd = AssetInfoValidated::Native("uusd".to_string());
+    let token = AssetInfoValidated::Token(Addr::unchecked("asset0000"));
+
+    // instantiate the contract
+    let msg = InstantiateMsg {
+        asset_infos: vec![uusd.clone().into(), token.clone().into()],
+        token_code_id: 10u64,
+        factory_addr: String::from("factory"),
+        init_params: Some(
+            to_binary(&StablePoolParams {
+                amp: 100,
+                owner: None,
+            })
+            .unwrap(),
+        ),
+        staking_config: default_stake_config(),
+        trading_starts: 0,
+        fee_config: FeeConfig {
+            total_fee_bps: 0,
+            protocol_fee_bps: 0,
+        },
+    };
+    instantiate(deps.as_mut(), env.clone(), mock_info("owner", &[]), msg).unwrap();
+
+    // Store the liquidity token
+    store_liquidity_token(deps.as_mut(), "liquidity0000".to_string());
+
+    // query price history before any price changes
+    let history: HistoricalPricesResponse = from_binary(
+        &query(
+            deps.as_ref(),
+            env.clone(),
+            QueryMsg::HistoricalPrices {
+                duration: HistoryDuration::Day,
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        history.historical_prices,
+        vec![
+            (uusd.clone(), token.clone(), vec![]),
+            (token.clone(), uusd.clone(), vec![])
+        ],
+        "price history should be empty, no price changes yet"
+    );
+
+    // provide liquidity to get a first price
+    let msg = ExecuteMsg::ProvideLiquidity {
+        assets: vec![
+            Asset {
+                info: uusd.clone().into(),
+                amount: 1_000_000u128.into(),
+            },
+            Asset {
+                info: token.clone().into(),
+                amount: 1_000_000u128.into(),
+            },
+        ],
+        slippage_tolerance: None,
+        receiver: None,
+    };
+    // need to set balance manually to simulate funds being sent
+    deps.querier
+        .with_balance(&[(&MOCK_CONTRACT_ADDR.into(), &[coin(1_000_000u128, "uusd")])]);
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        mock_info(user, &[coin(1_000_000u128, "uusd")]),
+        msg,
+    )
+    .unwrap();
+
+    // query price history after first price change
+    let history: HistoricalPricesResponse = from_binary(
+        &query(
+            deps.as_ref(),
+            env.clone(),
+            QueryMsg::HistoricalPrices {
+                duration: HistoryDuration::Day,
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        history.historical_prices,
+        vec![
+            (
+                uusd.clone(),
+                token.clone(),
+                vec![(env.block.time.seconds(), 934_113u128.into())]
+            ),
+            (
+                token.clone(),
+                uusd.clone(),
+                vec![(env.block.time.seconds(), 934_113u128.into())]
+            )
+        ],
+    );
+
+    // forward time half an hour
+    const HALF_HOUR: u64 = 30 * 60;
+    env.block.time = env.block.time.plus_seconds(HALF_HOUR);
+
+    // swap to get a second price
+    let msg = ExecuteMsg::Swap {
+        offer_asset: Asset {
+            info: uusd.clone().into(),
+            amount: 10_000u128.into(),
+        },
+        to: None,
+        max_spread: None,
+        belief_price: None,
+        ask_asset_info: None,
+        referral_address: None,
+        referral_commission: None,
+    };
+    // need to set balance manually to simulate funds being sent
+    deps.querier
+        .with_balance(&[(&MOCK_CONTRACT_ADDR.into(), &[coin(1_010_000u128, "uusd")])]);
+    deps.querier.with_token_balances(&[
+        (
+            &"asset0000".into(),
+            &[(&MOCK_CONTRACT_ADDR.into(), &1_000_000u128.into())],
+        ),
+        (
+            &"liquidity0000".into(),
+            &[(&MOCK_CONTRACT_ADDR.into(), &0u128.into())],
+        ),
+    ]);
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        mock_info(user, &[coin(10_000u128, "uusd")]),
+        msg,
+    )
+    .unwrap();
+
+    // query price history after swap price change
+    let history: HistoricalPricesResponse = from_binary(
+        &query(
+            deps.as_ref(),
+            env.clone(),
+            QueryMsg::HistoricalPrices {
+                duration: HistoryDuration::Day,
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        history.historical_prices,
+        vec![
+            (
+                uusd.clone(),
+                token.clone(),
+                vec![
+                    (env.block.time.seconds() - HALF_HOUR, 934_113u128.into()),
+                    (env.block.time.seconds(), 928_761u128.into())
+                ]
+            ),
+            (
+                token,
+                uusd,
+                vec![
+                    (env.block.time.seconds() - HALF_HOUR, 934_113u128.into()),
+                    (env.block.time.seconds(), 939_112u128.into())
+                ]
+            )
+        ],
     );
 }
 

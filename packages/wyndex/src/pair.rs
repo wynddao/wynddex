@@ -266,9 +266,19 @@ pub enum QueryMsg {
     /// Returns information about the cumulative prices in a [`CumulativePricesResponse`] object
     #[returns(CumulativePricesResponse)]
     CumulativePrices {},
+    /// Returns a price history of the given duration
+    #[returns(HistoricalPricesResponse)]
+    HistoricalPrices { duration: HistoryDuration },
     /// Returns current D invariant in as a [`u128`] value
     #[returns(Uint128)]
     QueryComputeD {},
+}
+
+#[cw_serde]
+pub enum HistoryDuration {
+    FifteenMinutes,
+    Day,
+    Week,
 }
 
 /// This struct is used to return a query result with the total amount of LP tokens and assets in a specific pool.
@@ -326,6 +336,16 @@ pub struct CumulativePricesResponse {
     pub total_share: Uint128,
     /// The vector contains cumulative prices for each pair of assets in the pool
     pub cumulative_prices: Vec<(AssetInfoValidated, AssetInfoValidated, Uint128)>,
+}
+
+pub type TimeSeries = Vec<(u64, Uint128)>;
+
+/// This structure is used to return a historical prices query response.
+#[cw_serde]
+pub struct HistoricalPricesResponse {
+    /// The vector contains historical prices for each pair of assets in the pool
+    /// The first element of the tuple is the offer asset, the second element is the ask asset
+    pub historical_prices: Vec<(AssetInfoValidated, AssetInfoValidated, TimeSeries)>,
 }
 
 /// This structure holds stableswap pool parameters.

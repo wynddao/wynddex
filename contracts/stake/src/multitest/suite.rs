@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::Result as AnyResult;
+use anyhow::{bail, Result as AnyResult};
 
 use cosmwasm_std::{to_binary, Addr, Coin, Decimal, Empty, StdResult, Uint128};
 use cw20::{BalanceResponse, Cw20Coin, Cw20ExecuteMsg, Cw20QueryMsg, MinterResponse};
@@ -42,12 +42,14 @@ pub(super) fn contract_token() -> Box<dyn Contract<Empty>> {
     Box::new(contract)
 }
 
+pub const JUNO_DENOM: &str = "juno";
+
 pub(super) fn juno_power(amount: u128) -> Vec<(AssetInfoValidated, u128)> {
-    vec![(AssetInfoValidated::Native("juno".to_string()), amount)]
+    vec![(AssetInfoValidated::Native(JUNO_DENOM.to_string()), amount)]
 }
 
 pub(super) fn juno(amount: u128) -> AssetValidated {
-    AssetInfoValidated::Native("juno".to_string()).with_balance(amount)
+    AssetInfoValidated::Native(JUNO_DENOM.to_string()).with_balance(amount)
 }
 
 pub(super) fn native_token(denom: String, amount: u128) -> AssetValidated {
@@ -197,6 +199,7 @@ impl SuiteBuilder {
 
         Suite {
             app,
+            token_id,
             stake_contract,
             token_contract,
         }
@@ -205,6 +208,7 @@ impl SuiteBuilder {
 
 pub struct Suite {
     pub app: App,
+    token_id: u64,
     stake_contract: Addr,
     token_contract: Addr,
 }
@@ -223,6 +227,44 @@ impl Suite {
         let mut block = self.app.block_info();
         block.time = block.time.plus_seconds(time_update);
         self.app.set_block(block);
+    }
+
+    /// Create a new token contract and return the address
+    pub fn instantiate_token(
+        &mut self,
+        owner: &Addr,
+        token_name: &str,
+        decimals: Option<u8>,
+        balances: &[(&str, u128)],
+    ) -> Addr {
+        let init_msg = cw20_base::msg::InstantiateMsg {
+            name: token_name.to_string(),
+            symbol: token_name.to_string(),
+            decimals: decimals.unwrap_or(6),
+            initial_balances: balances
+                .iter()
+                .map(|(address, amount)| Cw20Coin {
+                    address: address.to_string(),
+                    amount: Uint128::from(*amount),
+                })
+                .collect(),
+            mint: Some(MinterResponse {
+                minter: owner.to_string(),
+                cap: None,
+            }),
+            marketing: None,
+        };
+
+        self.app
+            .instantiate_contract(
+                self.token_id,
+                owner.clone(),
+                &init_msg,
+                &[],
+                token_name,
+                Some(owner.to_string()),
+            )
+            .unwrap()
     }
 
     fn unbonding_period_or_default(&self, unbonding_period: impl Into<Option<u64>>) -> u64 {
@@ -434,22 +476,57 @@ impl Suite {
         )
     }
 
+    pub fn execute_fund_distribution_curve(
+        &mut self,
+        executor: &str,
+        denom: impl Into<String>,
+        amount: u128,
+        reward_period: u64,
+    ) -> AnyResult<AppResponse> {
+        self.app.execute_contract(
+            Addr::unchecked(executor),
+            self.stake_contract.clone(),
+            &ExecuteMsg::FundDistribution {
+                curve: Curve::saturating_linear((0, amount), (reward_period, 0)),
+            },
+            &[Coin {
+                denom: denom.into(),
+                amount: Uint128::new(amount),
+            }],
+        )
+    }
+
     // call to staking contract by sender
     pub fn execute_fund_distribution_with_cw20(
         &mut self,
         executor: &str,
         funds: AssetValidated,
-        token: Addr,
     ) -> AnyResult<AppResponse> {
+        let funds_amount = funds.amount.u128();
+        self.execute_fund_distribution_with_cw20_curve(
+            executor,
+            funds,
+            Curve::saturating_linear((0, funds_amount), (100, 0)),
+        )
+    }
+
+    pub fn execute_fund_distribution_with_cw20_curve(
+        &mut self,
+        executor: &str,
+        funds: AssetValidated,
+        curve: Curve,
+    ) -> AnyResult<AppResponse> {
+        let token = match funds.info {
+            AssetInfoValidated::Token(contract_addr) => contract_addr,
+            _ => bail!("Only tokens are supported for cw20 distribution"),
+        };
         self.app.execute_contract(
             Addr::unchecked(executor),
             token,
             &Cw20ExecuteMsg::Send {
                 contract: self.stake_contract.to_string(),
                 amount: funds.amount,
-                msg: to_binary(&ReceiveDelegationMsg::Fund {
-                    curve: Curve::saturating_linear((0, funds.amount.u128()), (100, 0)),
-                })?,
+                msg: to_binary(&ReceiveDelegationMsg::Fund { curve })?,
             },
             &[],
         )

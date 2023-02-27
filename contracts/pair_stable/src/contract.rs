@@ -37,8 +37,8 @@ use crate::math::{
 };
 use crate::state::{get_precision, store_precisions, Config, CONFIG, OWNERSHIP_PROPOSAL};
 use crate::utils::{
-    accumulate_prices, adjust_precision, compute_current_amp, compute_swap, select_pools,
-    SwapResult,
+    accumulate_prices, adjust_precision, calc_new_prices, compute_current_amp, compute_swap,
+    select_pools, SwapResult,
 };
 use wyndex::pair::ContractError;
 
@@ -517,18 +517,32 @@ pub fn provide_liquidity(
         share,
     )?);
 
-    let pools = pools
-        .into_iter()
-        .map(|(info, amount)| {
-            let precision = get_precision(deps.storage, &info)?;
-            Ok(DecimalAsset {
-                info,
-                amount: Decimal256::with_precision(amount, precision)?,
-            })
+    // using assets_collection, since the deposit amount is already subtracted there
+    let old_pools = assets_collection
+        .iter()
+        .map(|(a, p)| DecimalAsset {
+            info: a.info.clone(),
+            amount: *p,
         })
-        .collect::<StdResult<Vec<_>>>()?;
+        .collect::<Vec<_>>();
 
-    if accumulate_prices(deps.as_ref(), env, &mut config, &pools)? {
+    if accumulate_prices(deps.as_ref(), &env, &mut config, &old_pools)? {
+        // calculate pools with deposited balances
+        let new_pools = assets_collection
+            .into_iter()
+            .map(|(mut asset, pool)| {
+                // add deposit amount back to pool amount, so we can calculate the new price
+                asset.amount += pool;
+                asset
+            })
+            .collect::<Vec<_>>();
+        let new_prices = calc_new_prices(deps.as_ref(), &env, &config, &new_pools)?;
+        wyndex::oracle::store_price(
+            deps.storage,
+            &env,
+            &config.pair_info.asset_infos,
+            new_prices,
+        )?;
         CONFIG.save(deps.storage, &config)?;
     }
 
@@ -608,7 +622,7 @@ pub fn withdraw_liquidity(
         .into(),
     );
 
-    let pools = pools
+    let old_pools = pools
         .iter()
         .map(|pool| {
             let precision = get_precision(deps.storage, &pool.info)?;
@@ -616,7 +630,24 @@ pub fn withdraw_liquidity(
         })
         .collect::<StdResult<Vec<DecimalAsset>>>()?;
 
-    if accumulate_prices(deps.as_ref(), env, &mut config, &pools)? {
+    if accumulate_prices(deps.as_ref(), &env, &mut config, &old_pools)? {
+        // calculate pools with withdrawn balances
+        let new_pools = pools
+            .into_iter()
+            .zip(refund_assets.iter())
+            .map(|(mut pool, refund)| {
+                pool.amount -= refund.amount;
+                let precision = get_precision(deps.storage, &pool.info)?;
+                pool.to_decimal_asset(precision)
+            })
+            .collect::<StdResult<Vec<DecimalAsset>>>()?;
+        let new_prices = calc_new_prices(deps.as_ref(), &env, &config, &new_pools)?;
+        wyndex::oracle::store_price(
+            deps.storage,
+            &env,
+            &config.pair_info.asset_infos,
+            new_prices,
+        )?;
         CONFIG.save(deps.storage, &config)?;
     }
 
@@ -896,7 +927,35 @@ pub fn swap(
         }
     }
 
-    if accumulate_prices(deps.as_ref(), env, &mut config, &pools)? {
+    if accumulate_prices(deps.as_ref(), &env, &mut config, &pools)? {
+        // calculate pools with deposited / withdrawn balances
+        let new_pools = pools
+            .into_iter()
+            .map(|mut pool| -> StdResult<DecimalAsset> {
+                if pool.info.equal(&offer_asset.info) {
+                    // add offer amount to pool (it was already subtracted right at the beginning)
+                    pool.amount = pool.amount.checked_add(Decimal256::with_precision(
+                        offer_asset.amount,
+                        offer_precision,
+                    )?)?;
+                } else if pool.info.equal(&ask_pool.info) {
+                    // subtract fee and return amount from ask pool
+                    let ask_precision = get_precision(deps.storage, &ask_pool.info)?;
+                    pool.amount = pool.amount.checked_sub(Decimal256::with_precision(
+                        return_amount + protocol_fee_amount,
+                        ask_precision,
+                    )?)?;
+                }
+                Ok(pool)
+            })
+            .collect::<StdResult<Vec<_>>>()?;
+        let new_prices = calc_new_prices(deps.as_ref(), &env, &config, &new_pools)?;
+        wyndex::oracle::store_price(
+            deps.storage,
+            &env,
+            &config.pair_info.asset_infos,
+            new_prices,
+        )?;
         CONFIG.save(deps.storage, &config)?;
     }
 
@@ -962,6 +1021,9 @@ pub fn calculate_protocol_fee(
 /// * **QueryMsg::CumulativePrices {}** Returns information about cumulative prices for the assets in the
 /// pool using a [`CumulativePricesResponse`] object.
 ///
+/// * **QueryMsg::HistoricalPrices { duration }** Returns historical price information for the assets in the
+/// pool using a [`HistoricalPricesResponse`] object.
+///
 /// * **QueryMsg::Config {}** Returns the configuration for the pair contract using a [`ConfigResponse`] object.
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
@@ -996,6 +1058,12 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             referral_commission,
         )?),
         QueryMsg::CumulativePrices {} => to_binary(&query_cumulative_prices(deps, env)?),
+        QueryMsg::HistoricalPrices { duration } => to_binary(&wyndex::oracle::query_historical(
+            deps,
+            &env,
+            CONFIG.load(deps.storage)?.pair_info.asset_infos,
+            duration,
+        )?),
         QueryMsg::Config {} => to_binary(&query_config(deps, env)?),
         QueryMsg::QueryComputeD {} => to_binary(&query_compute_d(deps, env)?),
     }
@@ -1222,7 +1290,7 @@ pub fn query_cumulative_prices(deps: Deps, env: Env) -> StdResult<CumulativePric
         })
         .collect::<StdResult<Vec<DecimalAsset>>>()?;
 
-    accumulate_prices(deps, env, &mut config, &decimal_assets)
+    accumulate_prices(deps, &env, &mut config, &decimal_assets)
         .map_err(|err| StdError::generic_err(format!("{err}")))?;
 
     Ok(CumulativePricesResponse {
