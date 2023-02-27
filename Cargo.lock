@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "cw-placeholder"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "cosmwasm-schema",
  "cosmwasm-std",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "cw-splitter"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "cosmwasm-schema",
  "cosmwasm-std",
@@ -662,7 +662,7 @@ checksum = "c8cbd1169bd7b4a0a20d92b9af7a7e0422888bd38a6f5ec29c1fd8c1558a272e"
 
 [[package]]
 name = "gauge-adapter"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -774,7 +774,7 @@ checksum = "fad582f4b9e86b6caa621cabeb0963332d92eea04729ab12892c2533951e6440"
 
 [[package]]
 name = "junoswap-staking"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -836,7 +836,7 @@ checksum = "f051f77a7c8e6957c0696eac88f26b0117e54f52d3fc682ab19397a8812846a4"
 
 [[package]]
 name = "nominated-trader"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -1039,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "raw-migration"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -1557,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "wyndex"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "cosmwasm-schema",
  "cosmwasm-std",
@@ -1572,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "wyndex-factory"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -1593,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "wyndex-multi-hop"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "wyndex-pair"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "cosmwasm-schema",
  "cosmwasm-std",
@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "wyndex-pair-stable"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
@@ -1651,7 +1651,7 @@ dependencies = [
 
 [[package]]
 name = "wyndex-stake"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "cosmwasm-schema",
