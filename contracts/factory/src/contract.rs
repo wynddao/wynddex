@@ -2,20 +2,9 @@ use cosmwasm_std::{
     attr, entry_point, to_binary, Addr, Binary, CosmosMsg, Decimal, Deps, DepsMut, Env,
     MessageInfo, Order, Reply, ReplyOn, Response, StdError, StdResult, SubMsg, WasmMsg,
 };
-use wyndex::fee_config::FeeConfig;
-use wyndex::stake::UnbondingPeriod;
-
-use crate::error::ContractError;
-use crate::querier::query_pair_info;
-
-use crate::state::{
-    check_asset_infos, pair_key, read_pairs, Config, TmpPairInfo, CONFIG, OWNERSHIP_PROPOSAL,
-    PAIRS, PAIRS_TO_MIGRATE, PAIR_CONFIGS, STAKING_ADDRESSES, TMP_PAIR_INFO,
-};
-
 use cw2::set_contract_version;
-use itertools::Itertools;
-use std::collections::HashSet;
+use cw_utils::ensure_from_older_version;
+
 use wyndex::asset::{addr_opt_validate, AssetInfo};
 use wyndex::common::{
     claim_ownership, drop_ownership_proposal, propose_new_owner, validate_addresses,
@@ -25,7 +14,19 @@ use wyndex::factory::{
     PairConfig, PairType, PairsResponse, PartialDefaultStakeConfig, PartialStakeConfig, QueryMsg,
     ROUTE,
 };
+use wyndex::fee_config::FeeConfig;
+use wyndex::stake::UnbondingPeriod;
 use wyndex_stake::msg::ExecuteMsg as StakeExecuteMsg;
+
+use crate::error::ContractError;
+use crate::querier::query_pair_info;
+use crate::state::{
+    check_asset_infos, pair_key, read_pairs, Config, TmpPairInfo, CONFIG, OWNERSHIP_PROPOSAL,
+    PAIRS, PAIRS_TO_MIGRATE, PAIR_CONFIGS, STAKING_ADDRESSES, TMP_PAIR_INFO,
+};
+
+use itertools::Itertools;
+use std::collections::HashSet;
 
 use cw_placeholder::contract::CONTRACT_NAME as PLACEHOLDER_CONTRACT_NAME;
 use wyndex::pair::{ExecuteMsg as PairExecuteMsg, InstantiateMsg as PairInstantiateMsg, PairInfo};
@@ -782,6 +783,9 @@ pub fn migrate(deps: DepsMut, env: Env, msg: MigrateMsg) -> Result<Response, Con
                 msg,
             )
             .unwrap();
+        }
+        MigrateMsg::Update() => {
+            ensure_from_older_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
         }
     };
 

@@ -352,15 +352,16 @@ pub enum UpdateAddr {
 pub enum MigrateMsg {
     /// Used to instantiate from cw-placeholder
     Init(InstantiateMsg),
+    Update(),
 }
 
 /// Map which contains a list of all pairs which are able to convert X <> Y assets.
 /// Example: given 3 pools (X, Y), (X,Y,Z) and (X,Y,Z,W), the map will contain the following entries
-/// (pair addresses):  
-/// `ROUTE[X][Y] = [(X,Y), (X,Y,Z), (X,Y,Z,W)]`  
-/// `ROUTE[X][Z] = [(X,Y,Z), (X,Y,Z,W)]`  
-/// `ROUTE[X][W] = [(X,Y,Z,W)]`  
-/// ...  
+/// (pair addresses):
+/// `ROUTE[X][Y] = [(X,Y), (X,Y,Z), (X,Y,Z,W)]`
+/// `ROUTE[X][Z] = [(X,Y,Z), (X,Y,Z,W)]`
+/// `ROUTE[X][W] = [(X,Y,Z,W)]`
+/// ...
 ///
 /// Notice that `ROUTE[X][Y] = ROUTE[Y][X]`
 pub const ROUTE: Map<(String, String), Vec<Addr>> = Map::new("routes");
