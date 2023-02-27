@@ -3,7 +3,10 @@ use cosmwasm_std::{Addr, Binary, Decimal, Uint128};
 use cw20::MinterResponse;
 use cw_multi_test::{App, AppResponse, ContractWrapper, Executor};
 use wyndex::asset::AssetInfo;
-use wyndex::factory::{DefaultStakeConfig, PairConfig, PairType, PartialStakeConfig, QueryMsg};
+use wyndex::factory::{
+    DefaultStakeConfig, PairConfig, PairType, PartialDefaultStakeConfig, PartialStakeConfig,
+    QueryMsg,
+};
 use wyndex::fee_config::FeeConfig;
 use wyndex::pair::PairInfo;
 
@@ -127,11 +130,13 @@ impl FactoryHelper {
         token_code_id: Option<u64>,
         fee_address: Option<String>,
         only_owner_can_create_pairs: Option<bool>,
+        default_stake_config: Option<PartialDefaultStakeConfig>,
     ) -> AnyResult<AppResponse> {
         let msg = wyndex::factory::ExecuteMsg::UpdateConfig {
             token_code_id,
             fee_address,
             only_owner_can_create_pairs,
+            default_stake_config,
         };
 
         router.execute_contract(sender.clone(), self.factory.clone(), &msg, &[])
@@ -158,6 +163,17 @@ impl FactoryHelper {
             staking_config: staking_config.unwrap_or_default(),
             total_fee_bps: None,
         };
+
+        router.execute_contract(sender.clone(), self.factory.clone(), &msg, &[])
+    }
+
+    pub fn deregister_pool_and_staking(
+        &mut self,
+        router: &mut App,
+        sender: &Addr,
+        asset_infos: Vec<AssetInfo>,
+    ) -> AnyResult<AppResponse> {
+        let msg = wyndex::factory::ExecuteMsg::Deregister { asset_infos };
 
         router.execute_contract(sender.clone(), self.factory.clone(), &msg, &[])
     }

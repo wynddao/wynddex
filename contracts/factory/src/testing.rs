@@ -221,6 +221,7 @@ fn update_config() {
         token_code_id: Some(200u64),
         fee_address: Some(String::from("new_fee_addr")),
         only_owner_can_create_pairs: Some(true),
+        default_stake_config: None,
     };
 
     let res = execute(deps.as_mut(), env.clone(), info, msg).unwrap();
@@ -243,6 +244,7 @@ fn update_config() {
         token_code_id: None,
         fee_address: None,
         only_owner_can_create_pairs: None,
+        default_stake_config: None,
     };
 
     let res = execute(deps.as_mut(), env, info, msg).unwrap_err();

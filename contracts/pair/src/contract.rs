@@ -17,6 +17,7 @@ use wyndex::asset::{
 use wyndex::decimal2decimal256;
 use wyndex::factory::{ConfigResponse as FactoryConfig, PairType};
 use wyndex::fee_config::FeeConfig;
+use wyndex::oracle::PricePoint;
 use wyndex::pair::{
     add_referral, assert_max_spread, check_asset_infos, check_assets, check_cw20_in_pool,
     create_lp_token, get_share_in_assets, handle_referral, handle_reply, migration_check,
@@ -431,6 +432,29 @@ pub fn provide_liquidity(
     if let Some((price0_cumulative_new, price1_cumulative_new, block_time)) =
         accumulate_prices(&env, &config, pools[0].amount, pools[1].amount)?
     {
+        // Calculate new pool amounts
+        let new_pool0 = pools[0].amount + deposits[0].amount;
+        let new_pool1 = pools[1].amount + deposits[1].amount;
+        let price_precision = Uint128::from(10u128.pow(TWAP_PRECISION.into()));
+        wyndex::oracle::store_price(
+            deps.storage,
+            &env,
+            &config.pair_info.asset_infos,
+            vec![
+                // new price for pool0 asset is amount of pool1 asset divided by amount of pool0 asset,
+                PricePoint::new(
+                    pools[1].info.clone(),
+                    pools[0].info.clone(),
+                    price_precision.multiply_ratio(new_pool1, new_pool0),
+                ),
+                // price for pool1 asset is the inverse of that
+                PricePoint::new(
+                    pools[0].info.clone(),
+                    pools[1].info.clone(),
+                    price_precision.multiply_ratio(new_pool0, new_pool1),
+                ),
+            ],
+        )?;
         config.price0_cumulative_last = price0_cumulative_new;
         config.price1_cumulative_last = price1_cumulative_new;
         config.block_time_last = block_time;
@@ -470,6 +494,32 @@ pub fn withdraw_liquidity(
     if let Some((price0_cumulative_new, price1_cumulative_new, block_time)) =
         accumulate_prices(&env, &config, pools[0].amount, pools[1].amount)?
     {
+        // Calculate new pool amounts
+        let mut new_pools = pools
+            .iter()
+            .zip(refund_assets.iter())
+            .map(|(p, r)| p.amount - r.amount);
+        let (new_pool0, new_pool1) = (new_pools.next().unwrap(), new_pools.next().unwrap());
+        let price_precision = Uint128::from(10u128.pow(TWAP_PRECISION.into()));
+        wyndex::oracle::store_price(
+            deps.storage,
+            &env,
+            &config.pair_info.asset_infos,
+            vec![
+                // new price for pool0 asset is amount of pool1 asset divided by amount of pool0 asset,
+                PricePoint::new(
+                    pools[1].info.clone(),
+                    pools[0].info.clone(),
+                    price_precision.multiply_ratio(new_pool1, new_pool0),
+                ),
+                // price for pool1 asset is the inverse of that
+                PricePoint::new(
+                    pools[0].info.clone(),
+                    pools[1].info.clone(),
+                    price_precision.multiply_ratio(new_pool0, new_pool1),
+                ),
+            ],
+        )?;
         config.price0_cumulative_last = price0_cumulative_new;
         config.price1_cumulative_last = price1_cumulative_new;
         config.block_time_last = block_time;
@@ -683,6 +733,41 @@ fn do_swap(
     if let Some((price0_cumulative_new, price1_cumulative_new, block_time)) =
         accumulate_prices(env, config, pools[0].amount, pools[1].amount)?
     {
+        // Calculate new pool amounts
+        let (new_pool0, new_pool1) = if pools[0].info.equal(&ask_pool.info) {
+            // subtract fee and return amount from ask pool
+            // add offer amount to offer pool
+            (
+                pools[0].amount - protocol_fee_amount - return_amount,
+                pools[1].amount + offer_amount,
+            )
+        } else {
+            // same as above, but with inverted indices
+            (
+                pools[0].amount + offer_amount,
+                pools[1].amount - protocol_fee_amount - return_amount,
+            )
+        };
+        let price_precision = Uint128::from(10u128.pow(TWAP_PRECISION.into()));
+        wyndex::oracle::store_price(
+            deps.storage,
+            env,
+            &config.pair_info.asset_infos,
+            vec![
+                // new price for pool0 asset is amount of pool1 asset divided by amount of pool0 asset,
+                PricePoint::new(
+                    pools[1].info.clone(),
+                    pools[0].info.clone(),
+                    price_precision.multiply_ratio(new_pool1, new_pool0),
+                ),
+                // price for pool1 asset is the inverse of that
+                PricePoint::new(
+                    pools[0].info.clone(),
+                    pools[1].info.clone(),
+                    price_precision.multiply_ratio(new_pool0, new_pool1),
+                ),
+            ],
+        )?;
         config.price0_cumulative_last = price0_cumulative_new;
         config.price1_cumulative_last = price1_cumulative_new;
         config.block_time_last = block_time;
@@ -783,6 +868,9 @@ pub fn calculate_protocol_fee(
 /// * **QueryMsg::CumulativePrices {}** Returns information about cumulative prices for the assets in the
 /// pool using a [`CumulativePricesResponse`] object.
 ///
+/// * **QueryMsg::HistoricalPrices { duration }** Returns historical price information for the assets in the
+/// pool using a [`HistoricalPricesResponse`] object.
+///
 /// * **QueryMsg::Config {}** Returns the configuration for the pair contract using a [`ConfigResponse`] object.
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
@@ -813,6 +901,12 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             referral_commission,
         )?),
         QueryMsg::CumulativePrices {} => to_binary(&query_cumulative_prices(deps, env)?),
+        QueryMsg::HistoricalPrices { duration } => to_binary(&wyndex::oracle::query_historical(
+            deps,
+            &env,
+            CONFIG.load(deps.storage)?.pair_info.asset_infos,
+            duration,
+        )?),
         QueryMsg::Config {} => to_binary(&query_config(deps)?),
         _ => Err(StdError::generic_err("Query is not supported")),
     }

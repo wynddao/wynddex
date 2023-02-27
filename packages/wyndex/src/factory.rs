@@ -104,6 +104,24 @@ impl DefaultStakeConfig {
         self
     }
 
+    pub fn update(&mut self, partial: PartialDefaultStakeConfig) {
+        if let Some(staking_code_id) = partial.staking_code_id {
+            self.staking_code_id = staking_code_id;
+        }
+        if let Some(tokens_per_power) = partial.tokens_per_power {
+            self.tokens_per_power = tokens_per_power;
+        }
+        if let Some(min_bond) = partial.min_bond {
+            self.min_bond = min_bond;
+        }
+        if let Some(unbonding_periods) = partial.unbonding_periods {
+            self.unbonding_periods = unbonding_periods;
+        }
+        if let Some(max_distributions) = partial.max_distributions {
+            self.max_distributions = max_distributions;
+        }
+    }
+
     pub fn to_stake_config(self) -> StakeConfig {
         StakeConfig {
             staking_code_id: self.staking_code_id,
@@ -113,6 +131,16 @@ impl DefaultStakeConfig {
             max_distributions: self.max_distributions,
         }
     }
+}
+
+/// For docs, see [`DefaultStakeConfig`]
+#[cw_serde]
+pub struct PartialDefaultStakeConfig {
+    pub staking_code_id: Option<u64>,
+    pub tokens_per_power: Option<Uint128>,
+    pub min_bond: Option<Uint128>,
+    pub unbonding_periods: Option<Vec<u64>>,
+    pub max_distributions: Option<u32>,
 }
 
 /// This structure describes the execute messages of the contract.
@@ -126,6 +154,8 @@ pub enum ExecuteMsg {
         fee_address: Option<String>,
         /// Whether only the owner or anyone can create new pairs
         only_owner_can_create_pairs: Option<bool>,
+        /// The default configuration for the staking contracts of new pairs
+        default_stake_config: Option<PartialDefaultStakeConfig>,
     },
     /// UpdatePairConfig updates the config for a pair type.
     UpdatePairConfig {

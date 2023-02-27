@@ -1,13 +1,14 @@
 mod factory_helper;
 
-use cosmwasm_std::{attr, Addr, Decimal, Uint128};
+use cosmwasm_std::{attr, from_slice, Addr, Decimal, StdError, Uint128};
 use wyndex::asset::AssetInfo;
 use wyndex::factory::{
     ConfigResponse, DefaultStakeConfig, ExecuteMsg, FeeInfoResponse, InstantiateMsg, MigrateMsg,
-    PairConfig, PairType, QueryMsg,
+    PairConfig, PairType, PartialDefaultStakeConfig, QueryMsg,
 };
 use wyndex::fee_config::FeeConfig;
 use wyndex::pair::PairInfo;
+use wyndex_factory::state::Config;
 
 use crate::factory_helper::{instantiate_token, FactoryHelper};
 use cw_multi_test::{App, ContractWrapper, Executor};
@@ -115,6 +116,13 @@ fn update_config() {
             Some(200u64),
             Some("fee".to_string()),
             Some(false),
+            Some(PartialDefaultStakeConfig {
+                staking_code_id: Some(12345),
+                tokens_per_power: None,
+                min_bond: Some(10000u128.into()),
+                unbonding_periods: None,
+                max_distributions: Some(u32::MAX),
+            }),
         )
         .unwrap();
 
@@ -126,11 +134,209 @@ fn update_config() {
     assert_eq!(200u64, config_res.token_code_id);
     assert_eq!("fee", config_res.fee_address.unwrap().to_string());
 
+    // query config raw to get default stake config
+    let raw_config: Config = from_slice(
+        &app.wrap()
+            .query_wasm_raw(&helper.factory, "config".as_bytes())
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        DefaultStakeConfig {
+            staking_code_id: 12345,
+            tokens_per_power: Uint128::new(1000), // same as before
+            min_bond: Uint128::new(10_000),
+            unbonding_periods: vec![1, 2, 3], // same as before
+            max_distributions: u32::MAX,
+        },
+        raw_config.default_stake_config
+    );
+
     // Unauthorized err
     let res = helper
-        .update_config(&mut app, &Addr::unchecked("not_owner"), None, None, None)
+        .update_config(
+            &mut app,
+            &Addr::unchecked("not_owner"),
+            None,
+            None,
+            None,
+            None,
+        )
         .unwrap_err();
     assert_eq!(res.root_cause().to_string(), "Unauthorized");
+}
+
+#[test]
+fn test_create_then_deregister_pair() {
+    let mut app = mock_app();
+    let owner = Addr::unchecked("owner");
+    let mut helper = FactoryHelper::init(&mut app, &owner);
+
+    let token1 = instantiate_token(
+        &mut app,
+        helper.cw20_token_code_id,
+        &owner,
+        "tokenX",
+        Some(18),
+    );
+    let token2 = instantiate_token(
+        &mut app,
+        helper.cw20_token_code_id,
+        &owner,
+        "tokenY",
+        Some(18),
+    );
+    // Create the pair which we will later delete
+    let res = helper
+        .create_pair(
+            &mut app,
+            &owner,
+            PairType::Xyk {},
+            [token1.as_str(), token2.as_str()],
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(res.events[1].attributes[1], attr("action", "create_pair"));
+    assert_eq!(
+        res.events[1].attributes[2],
+        attr("pair", format!("{}-{}", token1.as_str(), token2.as_str()))
+    );
+    // Verify the pair now exists
+    let res: PairInfo = app
+        .wrap()
+        .query_wasm_smart(
+            helper.factory.clone(),
+            &QueryMsg::Pair {
+                asset_infos: vec![
+                    AssetInfo::Token(token1.to_string()),
+                    AssetInfo::Token(token2.to_string()),
+                ],
+            },
+        )
+        .unwrap();
+
+    // In multitest, contract names are counted in the order in which contracts are created
+    assert_eq!("contract1", helper.factory.to_string());
+    assert_eq!("contract4", res.contract_addr.to_string());
+    assert_eq!("contract5", res.liquidity_token.to_string());
+    // Deregsiter the pair, which removes the Pair addr and the staking contract addr from Storage
+    helper
+        .deregister_pool_and_staking(
+            &mut app,
+            &owner,
+            vec![
+                AssetInfo::Token(token1.to_string()),
+                AssetInfo::Token(token2.to_string()),
+            ],
+        )
+        .unwrap();
+
+    // Verify the pair no longer exists
+    let err: Result<PairInfo, StdError> = app.wrap().query_wasm_smart(
+        helper.factory.clone(),
+        &QueryMsg::Pair {
+            asset_infos: vec![
+                AssetInfo::Token(token1.to_string()),
+                AssetInfo::Token(token2.to_string()),
+            ],
+        },
+    );
+
+    // In multitest, contract names are counted in the order in which contracts are created
+    assert_eq!(
+        err.unwrap_err(),
+        StdError::generic_err("Querier contract error: cosmwasm_std::addresses::Addr not found")
+    );
+}
+
+#[test]
+fn test_valid_staking() {
+    let mut app = mock_app();
+    let owner = Addr::unchecked("owner");
+    let mut helper = FactoryHelper::init(&mut app, &owner);
+
+    let token1 = instantiate_token(
+        &mut app,
+        helper.cw20_token_code_id,
+        &owner,
+        "tokenX",
+        Some(18),
+    );
+    let token2 = instantiate_token(
+        &mut app,
+        helper.cw20_token_code_id,
+        &owner,
+        "tokenY",
+        Some(18),
+    );
+
+    // Verify the pair now exists, we don't need to check the bool result here as non existence returns an Error
+    let is_valid: bool = app
+        .wrap()
+        .query_wasm_smart(
+            helper.factory.clone(),
+            &QueryMsg::ValidateStakingAddress {
+                address: "contract6".to_string(),
+            },
+        )
+        .unwrap();
+
+    assert!(!is_valid);
+    // Create the pair which we will later delete
+    let res = helper
+        .create_pair(
+            &mut app,
+            &owner,
+            PairType::Xyk {},
+            [token1.as_str(), token2.as_str()],
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(res.events[1].attributes[1], attr("action", "create_pair"));
+    assert_eq!(
+        res.events[1].attributes[2],
+        attr("pair", format!("{}-{}", token1.as_str(), token2.as_str()))
+    );
+
+    // Verify the pair now exists, we don't need to check the bool result here as non existence returns an Error
+    let is_valid: bool = app
+        .wrap()
+        .query_wasm_smart(
+            helper.factory.clone(),
+            &QueryMsg::ValidateStakingAddress {
+                address: "contract6".to_string(),
+            },
+        )
+        .unwrap();
+    assert!(is_valid);
+    // Deregsiter the pair, which removes the Pair addr and the staking contract addr from Storage
+    helper
+        .deregister_pool_and_staking(
+            &mut app,
+            &owner,
+            vec![
+                AssetInfo::Token(token1.to_string()),
+                AssetInfo::Token(token2.to_string()),
+            ],
+        )
+        .unwrap();
+
+    let is_valid: bool = app
+        .wrap()
+        .query_wasm_smart(
+            helper.factory.clone(),
+            &QueryMsg::ValidateStakingAddress {
+                address: "contract6".to_string(),
+            },
+        )
+        .unwrap();
+
+    assert!(!is_valid);
 }
 
 #[test]
@@ -312,7 +518,7 @@ fn test_create_pair_permissions() {
 
     // allow anyone to create pair
     helper
-        .update_config(&mut app, &owner, None, None, Some(false))
+        .update_config(&mut app, &owner, None, None, Some(false), None)
         .unwrap();
 
     // now it should work

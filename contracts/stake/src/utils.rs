@@ -14,6 +14,10 @@ pub fn calc_power(cfg: &Config, stake: Uint128, multiplier: Decimal) -> Uint128 
 pub trait CurveExt {
     /// Shifts this curve to the right by `x` units.
     fn shift(self, x: u64) -> Curve;
+
+    /// Returns the last `x` value of the curve, if any.
+    /// This will be `None` for infinite and empty curves.
+    fn end(&self) -> Option<u64>;
 }
 
 impl CurveExt for Curve {
@@ -22,6 +26,14 @@ impl CurveExt for Curve {
             c @ Curve::Constant { .. } => c,
             Curve::SaturatingLinear(sl) => sl.shift(x),
             Curve::PiecewiseLinear(pl) => pl.shift(x),
+        }
+    }
+
+    fn end(&self) -> Option<u64> {
+        match self {
+            Curve::Constant { .. } => None,
+            Curve::SaturatingLinear(sl) => sl.end(),
+            Curve::PiecewiseLinear(pl) => pl.end(),
         }
     }
 }
@@ -33,6 +45,10 @@ impl CurveExt for SaturatingLinear {
 
         Curve::SaturatingLinear(self)
     }
+
+    fn end(&self) -> Option<u64> {
+        Some(self.max_x)
+    }
 }
 
 impl CurveExt for PiecewiseLinear {
@@ -41,5 +57,9 @@ impl CurveExt for PiecewiseLinear {
             *x = x.checked_add(by).unwrap();
         }
         Curve::PiecewiseLinear(self)
+    }
+
+    fn end(&self) -> Option<u64> {
+        self.steps.last().map(|(x, _)| *x)
     }
 }

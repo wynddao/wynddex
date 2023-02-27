@@ -200,6 +200,80 @@ fn default_stake_config(staking_code_id: u64) -> DefaultStakeConfig {
     }
 }
 
+/// Instantiate a pair with a cw20 token as one of the assets
+fn instantiate_mixed_pair(
+    router: &mut App,
+    owner: &Addr,
+    cw20_balances: &[(&str, u128)],
+) -> (Addr, Addr) {
+    // instantiate cw20 token to use as a one of the assets
+    let cw20_token = instantiate_token(router, owner, cw20_balances);
+
+    let factory = instantiate_factory(router, owner);
+
+    // instantiate pair
+    let asset_infos = vec![
+        AssetInfo::Native("uusd".to_string()),
+        AssetInfo::Token(cw20_token.to_string()),
+    ];
+    let msg = FactoryExecuteMsg::CreatePair {
+        pair_type: PairType::Stable {},
+        asset_infos: asset_infos.clone(),
+        init_params: Some(
+            to_binary(&StablePoolParams {
+                amp: 100,
+                owner: None,
+            })
+            .unwrap(),
+        ),
+        total_fee_bps: None,
+        staking_config: PartialStakeConfig::default(),
+    };
+    router
+        .execute_contract(owner.clone(), factory.clone(), &msg, &[])
+        .unwrap();
+
+    // get pair address
+    let pair = router
+        .wrap()
+        .query_wasm_smart::<PairInfo>(factory, &FactoryQueryMsg::Pair { asset_infos })
+        .unwrap()
+        .contract_addr;
+
+    (pair, cw20_token)
+}
+
+/// Provide liquidity with a cw20 token as one of the assets
+fn provide_liquidity_mixed_msg(
+    uusd_amount: Uint128,
+    cw20_amount: Uint128,
+    cw20_token: &Addr,
+    receiver: Option<String>,
+    slippage_tolerance: Option<Decimal>,
+) -> (ExecuteMsg, [Coin; 1]) {
+    let msg = ExecuteMsg::ProvideLiquidity {
+        assets: vec![
+            Asset {
+                info: AssetInfo::Native("uusd".to_string()),
+                amount: uusd_amount,
+            },
+            Asset {
+                info: AssetInfo::Token(cw20_token.to_string()),
+                amount: cw20_amount,
+            },
+        ],
+        slippage_tolerance,
+        receiver,
+    };
+
+    let coins = [Coin {
+        denom: "uusd".to_string(),
+        amount: uusd_amount,
+    }];
+
+    (msg, coins)
+}
+
 #[test]
 fn test_provide_and_withdraw_liquidity() {
     let owner = Addr::unchecked("owner");
@@ -1616,4 +1690,119 @@ fn update_pair_config() {
     let params: StablePoolConfig = from_binary(&res.params.unwrap()).unwrap();
 
     assert_eq!(params.amp, Decimal::from_ratio(150u32, 1u32));
+}
+
+// Integration test showing the incorrect behaviour:
+#[test]
+fn test_mixed_twap_calculation() {
+    let owner = Addr::unchecked("owner");
+    let user1 = Addr::unchecked("user1");
+
+    let mut app = mock_app(
+        owner.clone(),
+        vec![Coin {
+            denom: "uusd".to_string(),
+            amount: Uint128::new(1_000_000_000_000_000),
+        }],
+    );
+
+    // Instantiate pair
+    let (pair_instance, cw20_token) = instantiate_mixed_pair(
+        &mut app,
+        &user1,
+        &[(user1.as_str(), 1_000_000_000_000_000u128)],
+    );
+
+    // Set Alice's balances
+    app.send_tokens(
+        owner,
+        user1.clone(),
+        &[Coin {
+            denom: "uusd".to_string(),
+            amount: Uint128::new(1_000_000_000_000_000),
+        }],
+    )
+    .unwrap();
+
+    // Set allowance for the pair contract to take tokens from Alice
+    let msg = Cw20ExecuteMsg::IncreaseAllowance {
+        spender: pair_instance.to_string(),
+        amount: Uint128::new(1_000_000_000_000_000),
+        expires: None,
+    };
+    app.execute_contract(user1.clone(), cw20_token.clone(), &msg, &[])
+        .unwrap();
+
+    // Provide liquidity, accumulators are empty (because the cw20 pool registers as empty)
+    let (msg, coins) = provide_liquidity_mixed_msg(
+        Uint128::new(1_000_000_000_000),
+        Uint128::new(1_000_000_000_000),
+        &cw20_token,
+        None,
+        Option::from(Decimal::one()),
+    );
+    app.execute_contract(user1.clone(), pair_instance.clone(), &msg, &coins)
+        .unwrap();
+
+    const BLOCKS_PER_DAY: u64 = 17280;
+    const ELAPSED_SECONDS: u64 = BLOCKS_PER_DAY * 5;
+
+    // A day later
+    app.update_block(|b| {
+        b.height += BLOCKS_PER_DAY;
+        b.time = b.time.plus_seconds(ELAPSED_SECONDS);
+    });
+
+    // Provide liquidity, accumulators firstly filled
+    // They *should* be filled with the price from the previous call (1.000000),
+    // but are actually filled with prices differing from that, because the pools are calculated as:
+    // uusd: 10_000_000_000_000 + 1_000_000_000_000, cw20: 1_000_000_000_000
+    // The 10_000_000_000_000 added by this call should be subtracted from the uusd pool, but they are not.
+    let (msg, coins) = provide_liquidity_mixed_msg(
+        Uint128::new(10_000_000_000_000),
+        Uint128::new(10_000_000_000_000),
+        &cw20_token,
+        None,
+        Some(Decimal::percent(50)),
+    );
+    app.execute_contract(user1.clone(), pair_instance.clone(), &msg, &coins)
+        .unwrap();
+
+    // Get current twap accumulator values
+    let msg = QueryMsg::CumulativePrices {};
+    let cpr_old: CumulativePricesResponse =
+        app.wrap().query_wasm_smart(&pair_instance, &msg).unwrap();
+
+    // A day later
+    app.update_block(|b| {
+        b.height += BLOCKS_PER_DAY;
+        b.time = b.time.plus_seconds(ELAPSED_SECONDS);
+    });
+
+    // Provide liquidity a second time
+    // Accumulator *should* be filled with the price from the previous call (1.000000),
+    // but are actually filled with prices differing from that, because the pools are calculated as:
+    // uusd: 10_000_000_000_000 + 11_000_000_000_000, cw20: 11_000_000_000_000
+    // The 10_000_000_000_000 added by this call should be subtracted from the uusd pool, but they are not.
+    let (msg, coins) = provide_liquidity_mixed_msg(
+        Uint128::new(10_000_000_000_000),
+        Uint128::new(10_000_000_000_000),
+        &cw20_token,
+        None,
+        Some(Decimal::percent(50)),
+    );
+    app.execute_contract(user1.clone(), pair_instance.clone(), &msg, &coins)
+        .unwrap();
+
+    // Get current twap accumulator values
+    let msg = QueryMsg::CumulativePrices {};
+    let cpr_new: CumulativePricesResponse =
+        app.wrap().query_wasm_smart(&pair_instance, &msg).unwrap();
+
+    let twap0 = cpr_new.cumulative_prices[0].2 - cpr_old.cumulative_prices[0].2;
+    let twap1 = cpr_new.cumulative_prices[1].2 - cpr_old.cumulative_prices[1].2;
+
+    let price_precision = Uint128::from(10u128.pow(TWAP_PRECISION.into()));
+    assert_eq!(twap0 / price_precision, Uint128::new(86400)); // expecting: 1.0 * ELAPSED_SECONDS (86400)
+    assert_eq!(twap1 / price_precision, Uint128::new(86400)); // expecting: 1.0 * ELAPSED_SECONDS
 }
