@@ -22,3 +22,7 @@ pub struct Config {
 
 /// Stores the config struct at the given key
 pub const CONFIG: Item<Config> = Item::new("config");
+// Address which can trigger a Freeze or Unfreeze via an ExecuteMsg variant
+pub const CIRCUIT_BREAKER: Item<Addr> = Item::new("circuit_breaker");
+// Whether the contract is frozen or not
+pub const FROZEN: Item<bool> = Item::new("frozen");

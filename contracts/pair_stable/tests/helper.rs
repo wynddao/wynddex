@@ -189,7 +189,15 @@ impl Helper {
         let init_pair_msg = wyndex::factory::ExecuteMsg::CreatePair {
             pair_type: PairType::Stable {},
             asset_infos: asset_infos.clone(),
-            init_params: Some(to_binary(&StablePoolParams { amp, owner: None }).unwrap()),
+            init_params: Some(
+                to_binary(&StablePoolParams {
+                    amp,
+                    owner: None,
+                    lsd_hub: None,
+                    target_rate_epoch: 0,
+                })
+                .unwrap(),
+            ),
             staking_config: PartialStakeConfig::default(),
             total_fee_bps: None,
         };

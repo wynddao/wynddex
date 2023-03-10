@@ -6,7 +6,7 @@ use wyndex::oracle::PricePoint;
 use wyndex::asset::{AssetInfoValidated, Decimal256Ext, DecimalAsset};
 use wyndex::pair::TWAP_PRECISION;
 
-use crate::math::calc_y;
+use crate::math::{apply_rate, calc_y};
 use crate::state::{get_precision, Config};
 use wyndex::pair::ContractError;
 
@@ -146,6 +146,7 @@ pub(crate) fn compute_swap(
         pools,
         compute_current_amp(config, env)?,
         token_precision,
+        config.target_rate,
     )?;
 
     let return_amount = ask_pool.amount.to_uint128_with_precision(token_precision)? - new_ask_pool;
@@ -153,8 +154,11 @@ pub(crate) fn compute_swap(
         .amount
         .to_uint128_with_precision(token_precision)?;
 
-    // We consider swap rate 1:1 in stable swap thus any difference is considered as spread.
-    let spread_amount = offer_asset_amount.saturating_sub(return_amount);
+    // We consider swap rate to be target_rate in stable swap thus any difference is considered as spread.
+    let spread_amount =
+        apply_rate(&offer_asset.info, offer_asset_amount, config.target_rate).saturating_sub(
+            apply_rate(&ask_pool.info, return_amount, config.target_rate),
+        );
 
     Ok(SwapResult {
         return_amount,
@@ -165,6 +169,8 @@ pub(crate) fn compute_swap(
 /// Accumulate token prices for the assets in the pool.
 /// Returns the array of new prices for the asset combinations in the pool.
 /// Empty if the config is still up to date.
+///
+/// *Important*: Make sure to update the target rate before calling this function.
 ///
 /// * **pools** array with assets available in the pool *before* the operation.
 pub fn accumulate_prices(

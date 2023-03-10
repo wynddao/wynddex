@@ -29,7 +29,9 @@ As an example, let's say someone LPs in a pool and specifies a 1% slippage toler
 Wyndex has two options to protect traders against slippage during swaps:
 
 1. Providing `max_spread`
-The spread is calculated as the difference between the ask amount (using the constant pool price) before and after the swap operation. Once `max_spread` is set, it will be compared against the actual swap spread. In case the swap spread exceeds the provided max limit, the swap will fail.
+The spread is calculated as the difference between the ask amount (using the constant pool price) before and after the swap operation.
+For liquid staking pairs, it is calculated relative to the latest target rate queried from the trusted oracle (e.g. the staking contract).
+Once `max_spread` is set, it will be compared against the actual swap spread. In case the swap spread exceeds the provided max limit, the swap will fail.
 
 Note that the spread is calculated before commission deduction in order to properly represent the pool's ratio change.
 
@@ -37,6 +39,16 @@ Note that the spread is calculated before commission deduction in order to prope
 If `belief_price` is provided in combination with `max_spread`, the pool will check the difference between the return amount (using `belief_price`) and the real pool price.
 
 Please note that Wyndex has the default value for the spread set to 0.5% and the max allowed spread set to 50%.
+
+## Known Issues
+
+As the target rate changes for liquid staking pairs, they rely on arbitrageurs to keep the price relatively close to the target rate.
+If this does not happen for a prolonged period of time, trading in the other direction will fail due to the large spread.
+For example, if the target rate changes from `1.0` to `1.5`, but the pool amounts remain the same,
+then there is far too much of the liquid staking token in the pool compared to the native token in the pool.
+In this case, swapping native tokens for LSD tokens is still possible and is exactly what is expected to happen,
+as there is an arbitrage opportunity here.
+However, swapping the LSD token for its native token will fail due to a high spread until the price stabilises around the target rate.
 
 ## InstantiateMsg
 

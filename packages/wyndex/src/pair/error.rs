@@ -56,6 +56,12 @@ pub enum ContractError {
     #[error("Insufficient amount of liquidity")]
     LiquidityAmountTooSmall {},
 
+    #[error("The target rate epoch is specified in seconds and has to be less than a week")]
+    InvalidTargetRateEpoch {},
+
+    #[error("A pool with a dynamic target rate can only have 2 assets, one native token and one cw20 token")]
+    InvalidAssetsForTargetRate {},
+
     #[error("Amp coefficient must be greater than 0 and less than or equal to {max_amp}")]
     IncorrectAmp { max_amp: u64 },
 
@@ -96,6 +102,8 @@ pub enum ContractError {
         "Invalid number of assets. Expected at least 2 and at most {max} assets, but got {provided}"
     )]
     TooManyAssets { max: usize, provided: usize },
+    #[error("Contract has been frozen")]
+    ContractFrozen {},
 }
 
 impl From<ContractError> for StdError {

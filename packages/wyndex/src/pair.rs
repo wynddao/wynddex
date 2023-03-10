@@ -108,6 +108,8 @@ pub struct InstantiateMsg {
     pub staking_config: StakeConfig,
     /// The block time until which trading is disabled
     pub trading_starts: u64,
+    /// Address which can call ExecuteMsg::Freeze
+    pub circuit_breaker: Option<String>,
 }
 
 impl InstantiateMsg {
@@ -204,6 +206,8 @@ pub enum ExecuteMsg {
     DropOwnershipProposal {},
     /// Used to claim contract ownership.
     ClaimOwnership {},
+    /// Freeze all but withdraw liquidity, can only be called if a circuit breaker is set through a MigrateMsg
+    Freeze { frozen: bool },
 }
 
 /// This structure describes a CW20 hook message.
@@ -223,6 +227,15 @@ pub enum Cw20HookMsg {
     },
     /// Withdraw liquidity from the pool
     WithdrawLiquidity { assets: Vec<Asset> },
+}
+
+#[cw_serde]
+pub enum MigrateMsg {
+    UpdateFreeze {
+        frozen: bool,
+        // TODO: better name. this may be an address that can set frozen itself
+        circuit_breaker: Option<String>,
+    },
 }
 
 /// This structure describes the query messages available in the contract.
@@ -355,6 +368,12 @@ pub struct StablePoolParams {
     pub amp: u64,
     /// The contract owner
     pub owner: Option<String>,
+
+    /// Address of the liquid staking hub contract for this pool.
+    /// If set, this is used to get the target value to concentrate liquidity around.
+    pub lsd_hub: Option<String>,
+    /// The minimum amount of time in seconds between two target value queries
+    pub target_rate_epoch: u64,
 }
 
 /// This structure stores a stableswap pool's configuration.

@@ -1,5 +1,5 @@
 use cosmwasm_schema::cw_serde;
-use cosmwasm_std::{Addr, DepsMut, StdResult, Storage, Uint128};
+use cosmwasm_std::{Addr, Decimal, DepsMut, StdResult, Storage, Uint128};
 use cw_storage_plus::{Item, Map};
 use wyndex::asset::AssetInfoValidated;
 use wyndex::common::OwnershipProposal;
@@ -30,10 +30,24 @@ pub struct Config {
     pub cumulative_prices: Vec<(AssetInfoValidated, AssetInfoValidated, Uint128)>,
     /// The block time until which trading is disabled
     pub trading_starts: u64,
+
+    /// Address of the liquid staking hub contract for this pool.
+    /// If set, this is used to get the target value to concentrate liquidity around.
+    pub lsd_hub: Option<Addr>,
+    /// The target rate to concentrate liquidity around. Defaults to `1.0`.
+    /// If `lsd_hub` is set, this is updated once per `target_rate_epoch`.
+    pub target_rate: Decimal,
+    /// The minimum amount of time in seconds between two target value queries
+    pub target_rate_epoch: u64,
+    /// The last timestamp when the target value was queried
+    pub last_target_query: u64,
 }
 
 pub const CONFIG: Item<Config> = Item::new("config");
-
+// Address which can trigger a Freeze or Unfreeze via an ExecuteMsg variant
+pub const CIRCUIT_BREAKER: Item<Addr> = Item::new("circuit_breaker");
+// Whether the contract is frozen or not
+pub const FROZEN: Item<bool> = Item::new("frozen");
 /// Stores map of AssetInfo (as String) -> precision
 const PRECISIONS: Map<String, u8> = Map::new("precisions");
 

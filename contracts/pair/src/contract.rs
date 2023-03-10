@@ -1,9 +1,9 @@
-use crate::state::{Config, CONFIG};
+use crate::state::{Config, CIRCUIT_BREAKER, CONFIG, FROZEN};
 
 use cosmwasm_std::{
-    attr, entry_point, from_binary, to_binary, Addr, Binary, CosmosMsg, Decimal, Decimal256, Deps,
-    DepsMut, Env, Isqrt, MessageInfo, QuerierWrapper, Reply, Response, StdError, StdResult,
-    Uint128, Uint256, WasmMsg,
+    attr, ensure, entry_point, from_binary, to_binary, Addr, Binary, CosmosMsg, Decimal,
+    Decimal256, Deps, DepsMut, Env, Isqrt, MessageInfo, QuerierWrapper, Reply, Response, StdError,
+    StdResult, Uint128, Uint256, WasmMsg,
 };
 
 use cw2::set_contract_version;
@@ -22,7 +22,7 @@ use wyndex::pair::{
     add_referral, assert_max_spread, check_asset_infos, check_assets, check_cw20_in_pool,
     create_lp_token, get_share_in_assets, handle_referral, handle_reply, migration_check,
     mint_token_message, save_tmp_staking_config, take_referral, ConfigResponse, ContractError,
-    Cw20HookMsg, DEFAULT_SLIPPAGE, MAX_ALLOWED_SLIPPAGE,
+    Cw20HookMsg, MigrateMsg, DEFAULT_SLIPPAGE, MAX_ALLOWED_SLIPPAGE,
 };
 use wyndex::pair::{
     CumulativePricesResponse, ExecuteMsg, InstantiateMsg, PairInfo, PoolResponse, QueryMsg,
@@ -80,7 +80,7 @@ pub fn instantiate(
     };
 
     CONFIG.save(deps.storage, &config)?;
-
+    FROZEN.save(deps.storage, &false)?;
     save_tmp_staking_config(deps.storage, &msg.staking_config)?;
 
     Ok(Response::new().add_submessage(create_lp_token_msg))
@@ -94,6 +94,24 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
     CONFIG.save(deps.storage, &config)?;
 
     Ok(res)
+}
+
+/// Manages the contract migration.
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, ContractError> {
+    match msg {
+        MigrateMsg::UpdateFreeze {
+            frozen,
+            circuit_breaker,
+        } => {
+            FROZEN.save(deps.storage, &frozen)?;
+            if let Some(circuit_breaker) = circuit_breaker {
+                CIRCUIT_BREAKER.save(deps.storage, &deps.api.addr_validate(&circuit_breaker)?)?;
+            }
+        }
+    }
+
+    Ok(Response::new())
 }
 
 /// Exposes all the execute functions available in the contract.
@@ -167,6 +185,17 @@ pub fn execute(
                 referral_commission,
             )
         }
+        ExecuteMsg::Freeze { frozen } => {
+            ensure!(
+                info.sender
+                    == CIRCUIT_BREAKER
+                        .may_load(deps.storage)?
+                        .unwrap_or_else(|| Addr::unchecked("")),
+                ContractError::Unauthorized {}
+            );
+            FROZEN.save(deps.storage, &frozen)?;
+            Ok(Response::new())
+        }
         _ => Err(ContractError::NonSupported {}),
     }
 }
@@ -228,6 +257,7 @@ pub fn update_fees(
     fee_config: FeeConfig,
 ) -> Result<Response, ContractError> {
     let mut config = CONFIG.load(deps.storage)?;
+    check_if_frozen(&deps)?;
 
     // check permissions
     if info.sender != config.factory_addr {
@@ -262,6 +292,7 @@ pub fn provide_liquidity(
     receiver: Option<String>,
 ) -> Result<Response, ContractError> {
     let mut assets = check_assets(deps.api, &assets)?;
+    check_if_frozen(&deps)?;
 
     if assets.len() > 2 {
         return Err(ContractError::TooManyAssets {
@@ -578,6 +609,8 @@ pub fn swap(
     offer_asset.assert_sent_native_token_balance(&info)?;
     let original_offer_asset = offer_asset.clone();
 
+    check_if_frozen(&deps)?;
+
     let mut config = CONFIG.load(deps.storage)?;
     // Get config from the factory
     let factory_config = query_factory_config(&deps.querier, &config.factory_addr)?;
@@ -648,6 +681,12 @@ pub fn swap(
             attr("commission_amount", commission_amount),
             attr("protocol_fee_amount", protocol_fee_amount),
         ]))
+}
+
+fn check_if_frozen(deps: &DepsMut) -> Result<(), ContractError> {
+    let is_frozen: bool = FROZEN.load(deps.storage)?;
+    ensure!(!is_frozen, ContractError::ContractFrozen {});
+    Ok(())
 }
 
 struct SwapResult {

@@ -4,9 +4,9 @@ use std::vec;
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    attr, from_binary, to_binary, wasm_execute, Addr, Binary, CosmosMsg, Decimal, Decimal256, Deps,
-    DepsMut, Env, Fraction, MessageInfo, QuerierWrapper, Reply, Response, StdError, StdResult,
-    Uint128, Uint256, WasmMsg,
+    attr, ensure, from_binary, to_binary, wasm_execute, Addr, Binary, CosmosMsg, Decimal,
+    Decimal256, Deps, DepsMut, Empty, Env, Fraction, MessageInfo, QuerierWrapper, Reply, Response,
+    StdError, StdResult, Uint128, Uint256, WasmMsg,
 };
 use cw2::set_contract_version;
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
@@ -23,7 +23,7 @@ use wyndex::pair::{
     add_referral, assert_max_spread, check_asset_infos, check_assets, check_cw20_in_pool,
     create_lp_token, get_share_in_assets, handle_referral, handle_reply, migration_check,
     mint_token_message, save_tmp_staking_config, take_referral, ConfigResponse, Cw20HookMsg,
-    InstantiateMsg, StablePoolParams, StablePoolUpdateParams,
+    InstantiateMsg, MigrateMsg, StablePoolParams, StablePoolUpdateParams,
 };
 use wyndex::pair::{
     CumulativePricesResponse, ExecuteMsg, PairInfo, PoolResponse, QueryMsg,
@@ -35,7 +35,10 @@ use wyndex::DecimalCheckedOps;
 use crate::math::{
     calc_y, compute_d, AMP_PRECISION, MAX_AMP, MAX_AMP_CHANGE, MIN_AMP_CHANGING_TIME,
 };
-use crate::state::{get_precision, store_precisions, Config, CONFIG, OWNERSHIP_PROPOSAL};
+use crate::msg::{TargetQuery, TargetValueResponse};
+use crate::state::{
+    get_precision, store_precisions, Config, CIRCUIT_BREAKER, CONFIG, FROZEN, OWNERSHIP_PROPOSAL,
+};
 use crate::utils::{
     accumulate_prices, adjust_precision, calc_new_prices, compute_current_amp, compute_swap,
     select_pools, SwapResult,
@@ -46,6 +49,8 @@ use wyndex::pair::ContractError;
 const CONTRACT_NAME: &str = "wyndex-pair-stable";
 /// Contract version that is used for migration.
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const WEEK: u64 = 7 * 24 * 60 * 60;
 
 /// Creates a new contract with the specified parameters in [`InstantiateMsg`].
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -72,6 +77,18 @@ pub fn instantiate(
     if params.amp == 0 || params.amp > MAX_AMP {
         return Err(ContractError::IncorrectAmp { max_amp: MAX_AMP });
     }
+
+    ensure!(
+        params.target_rate_epoch <= WEEK,
+        ContractError::InvalidTargetRateEpoch {}
+    );
+    ensure!(
+        params.lsd_hub.is_none()
+            || asset_infos.len() == 2
+                && asset_infos.iter().any(|a| a.is_native_token())
+                && asset_infos.iter().any(|a| !a.is_native_token()),
+        ContractError::InvalidAssetsForTargetRate {}
+    );
 
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
@@ -116,9 +133,17 @@ pub fn instantiate(
         greatest_precision,
         cumulative_prices,
         trading_starts: msg.trading_starts,
+        lsd_hub: params
+            .lsd_hub
+            .map(|addr| deps.api.addr_validate(&addr))
+            .transpose()?,
+        target_rate: Decimal::one(),
+        target_rate_epoch: params.target_rate_epoch,
+        last_target_query: 0, // will be queried on first interaction
     };
 
     CONFIG.save(deps.storage, &config)?;
+    FROZEN.save(deps.storage, &false)?;
 
     save_tmp_staking_config(deps.storage, &msg.staking_config)?;
 
@@ -133,6 +158,31 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
     CONFIG.save(deps.storage, &config)?;
 
     Ok(res)
+}
+
+/// Manages the contract migration.
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, ContractError> {
+    match msg {
+        MigrateMsg::UpdateFreeze {
+            frozen,
+            circuit_breaker,
+        } => {
+            FROZEN.save(deps.storage, &frozen)?;
+            if let Some(circuit_breaker) = circuit_breaker {
+                CIRCUIT_BREAKER.save(deps.storage, &deps.api.addr_validate(&circuit_breaker)?)?;
+            }
+        }
+    }
+
+    Ok(Response::new())
+}
+
+/// Helper function to check if the pool has been frozen
+fn check_if_frozen(deps: &DepsMut) -> Result<(), ContractError> {
+    let is_frozen: bool = FROZEN.load(deps.storage)?;
+    ensure!(!is_frozen, ContractError::ContractFrozen {});
+    Ok(())
 }
 
 /// Exposes all the execute functions available in the contract.
@@ -247,6 +297,17 @@ pub fn execute(
             })
             .map_err(|e| e.into())
         }
+        ExecuteMsg::Freeze { frozen } => {
+            ensure!(
+                info.sender
+                    == CIRCUIT_BREAKER
+                        .may_load(deps.storage)?
+                        .unwrap_or_else(|| Addr::unchecked("")),
+                ContractError::Unauthorized {}
+            );
+            FROZEN.save(deps.storage, &frozen)?;
+            Ok(Response::new())
+        }
     }
 }
 
@@ -307,6 +368,8 @@ pub fn update_fees(
     info: MessageInfo,
     fee_config: FeeConfig,
 ) -> Result<Response, ContractError> {
+    check_if_frozen(&deps)?;
+
     let mut config = CONFIG.load(deps.storage)?;
 
     // check permissions
@@ -336,6 +399,7 @@ pub fn provide_liquidity(
     assets: Vec<Asset>,
     receiver: Option<String>,
 ) -> Result<Response, ContractError> {
+    check_if_frozen(&deps)?;
     let assets = check_assets(deps.api, &assets)?;
     let mut config = CONFIG.load(deps.storage)?;
 
@@ -345,6 +409,8 @@ pub fn provide_liquidity(
             provided: assets.len(),
         });
     }
+
+    let save_config = update_target_rate(deps.querier, &mut config, &env)?;
 
     let pools: HashMap<_, _> = config
         .pair_info
@@ -544,6 +610,8 @@ pub fn provide_liquidity(
             new_prices,
         )?;
         CONFIG.save(deps.storage, &config)?;
+    } else if save_config {
+        CONFIG.save(deps.storage, &config)?;
     }
 
     Ok(Response::new().add_messages(messages).add_attributes(vec![
@@ -630,6 +698,7 @@ pub fn withdraw_liquidity(
         })
         .collect::<StdResult<Vec<DecimalAsset>>>()?;
 
+    let save_config = update_target_rate(deps.querier, &mut config, &env)?;
     if accumulate_prices(deps.as_ref(), &env, &mut config, &old_pools)? {
         // calculate pools with withdrawn balances
         let new_pools = pools
@@ -648,6 +717,8 @@ pub fn withdraw_liquidity(
             &config.pair_info.asset_infos,
             new_prices,
         )?;
+        CONFIG.save(deps.storage, &config)?;
+    } else if save_config {
         CONFIG.save(deps.storage, &config)?;
     }
 
@@ -819,6 +890,7 @@ pub fn swap(
     referral_address: Option<Addr>,
     referral_commission: Option<Decimal>,
 ) -> Result<Response, ContractError> {
+    check_if_frozen(&deps)?;
     offer_asset.assert_sent_native_token_balance(&info)?;
 
     let ask_asset_info = ask_asset_info.map(|a| a.validate(deps.api)).transpose()?;
@@ -827,6 +899,7 @@ pub fn swap(
     if env.block.time.seconds() < config.trading_starts {
         return Err(ContractError::TradingNotStarted {});
     }
+
     // If the asset balance already increased
     // We should subtract the user deposit from the pool offer asset amount
     let pools = config
@@ -875,6 +948,7 @@ pub fn swap(
         offer_asset.amount,
     )?;
 
+    let save_config = update_target_rate(deps.querier, &mut config, &env)?;
     let SwapResult {
         return_amount,
         spread_amount,
@@ -956,6 +1030,8 @@ pub fn swap(
             &config.pair_info.asset_infos,
             new_prices,
         )?;
+        CONFIG.save(deps.storage, &config)?;
+    } else if save_config {
         CONFIG.save(deps.storage, &config)?;
     }
 
@@ -1108,7 +1184,7 @@ pub fn query_simulation(
 ) -> StdResult<SimulationResponse> {
     let mut offer_asset = offer_asset.validate(deps.api)?;
     let ask_asset_info = ask_asset_info.map(|a| a.validate(deps.api)).transpose()?;
-    let config = CONFIG.load(deps.storage)?;
+    let mut config = CONFIG.load(deps.storage)?;
     let pools = config
         .pair_info
         .query_pools_decimal(&deps.querier, &config.pair_info.contract_addr)?;
@@ -1146,6 +1222,7 @@ pub fn query_simulation(
         });
     }
 
+    update_target_rate(deps.querier, &mut config, &env)?;
     let SwapResult {
         return_amount,
         spread_amount,
@@ -1193,7 +1270,7 @@ pub fn query_reverse_simulation(
     let ask_asset = ask_asset.validate(deps.api)?;
     let offer_asset_info = offer_asset_info.map(|a| a.validate(deps.api)).transpose()?;
 
-    let config = CONFIG.load(deps.storage)?;
+    let mut config = CONFIG.load(deps.storage)?;
     let pools = config
         .pair_info
         .query_pools_decimal(&deps.querier, &config.pair_info.contract_addr)?;
@@ -1237,6 +1314,7 @@ pub fn query_reverse_simulation(
     .unwrap_or_else(Decimal256::one)
     .checked_mul(Decimal256::with_precision(ask_asset.amount, ask_precision)?)?;
 
+    update_target_rate(deps.querier, &mut config, &env)?;
     let new_offer_pool_amount = calc_y(
         &ask_pool,
         &offer_pool.info,
@@ -1244,6 +1322,7 @@ pub fn query_reverse_simulation(
         &pools,
         compute_current_amp(&config, &env)?,
         config.greatest_precision,
+        config.target_rate,
     )?;
 
     let offer_amount = new_offer_pool_amount.checked_sub(
@@ -1437,4 +1516,30 @@ fn query_compute_d(deps: Deps, env: Env) -> StdResult<Uint128> {
     compute_d(amp, &pools, config.greatest_precision)
         .map_err(|_| StdError::generic_err("Failed to calculate the D"))?
         .to_uint128_with_precision(config.greatest_precision)
+}
+
+/// Updates the config's target rate from the configured lsd hub contract if it is outdated.
+/// Returns `true` if the target rate was updated, `false` otherwise.
+fn update_target_rate(
+    querier: QuerierWrapper<Empty>,
+    config: &mut Config,
+    env: &Env,
+) -> StdResult<bool> {
+    let now = env.block.time.seconds();
+    if now < config.last_target_query + config.target_rate_epoch {
+        // target rate is up to date
+        return Ok(false);
+    }
+
+    if let Some(hub) = &config.lsd_hub {
+        let response: TargetValueResponse =
+            querier.query_wasm_smart(hub, &TargetQuery::TargetValue {})?;
+
+        config.target_rate = response.target_value;
+        config.last_target_query = now;
+
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
