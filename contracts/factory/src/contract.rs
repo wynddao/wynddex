@@ -466,6 +466,7 @@ pub fn execute_create_pair(
                     total_fee_bps: total_fee_bps.unwrap_or(pair_config.fee_config.total_fee_bps),
                     protocol_fee_bps: pair_config.fee_config.protocol_fee_bps,
                 },
+                circuit_breaker: None,
             })?,
             funds: vec![],
             label: "Wyndex pair".to_string(),

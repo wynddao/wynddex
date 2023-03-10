@@ -136,6 +136,8 @@ fn instantiate_pair(router: &mut App, owner: &Addr) -> Addr {
             to_binary(&StablePoolParams {
                 amp: 100,
                 owner: None,
+                lsd_hub: None,
+                target_rate_epoch: 0,
             })
             .unwrap(),
         ),
@@ -223,6 +225,8 @@ fn instantiate_mixed_pair(
             to_binary(&StablePoolParams {
                 amp: 100,
                 owner: None,
+                lsd_hub: None,
+                target_rate_epoch: 0,
             })
             .unwrap(),
         ),
@@ -565,6 +569,8 @@ fn provide_lp_for_single_token() {
             to_binary(&StablePoolParams {
                 amp: 100,
                 owner: None,
+                lsd_hub: None,
+                target_rate_epoch: 0,
             })
             .unwrap(),
         ),
@@ -886,6 +892,8 @@ fn test_compatibility_of_tokens_with_different_precision() {
             to_binary(&StablePoolParams {
                 amp: 100,
                 owner: None,
+                lsd_hub: None,
+                target_rate_epoch: 0,
             })
             .unwrap(),
         ),
@@ -1120,6 +1128,7 @@ fn create_pair_with_same_assets() {
             total_fee_bps: 0,
             protocol_fee_bps: 0,
         },
+        circuit_breaker: None,
     };
 
     let resp = router
@@ -1306,6 +1315,8 @@ fn provide_liquidity_with_one_cw20_asset() {
             to_binary(&StablePoolParams {
                 amp: 100,
                 owner: None,
+                lsd_hub: None,
+                target_rate_epoch: 0,
             })
             .unwrap(),
         ),
@@ -1502,6 +1513,8 @@ fn update_pair_config() {
             to_binary(&StablePoolParams {
                 amp: 100,
                 owner: None,
+                lsd_hub: None,
+                target_rate_epoch: 0,
             })
             .unwrap(),
         ),
@@ -1511,6 +1524,7 @@ fn update_pair_config() {
             protocol_fee_bps: 0,
             total_fee_bps: 0,
         },
+        circuit_breaker: None,
     };
 
     let pair = router

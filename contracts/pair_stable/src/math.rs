@@ -1,4 +1,6 @@
-use cosmwasm_std::{Decimal256, StdError, StdResult, Uint128, Uint256, Uint64};
+use std::ops::Mul;
+
+use cosmwasm_std::{Decimal, Decimal256, Fraction, StdError, StdResult, Uint128, Uint256, Uint64};
 use itertools::Itertools;
 use wyndex::asset::{AssetInfoValidated, Decimal256Ext, DecimalAsset};
 
@@ -72,10 +74,11 @@ pub(crate) fn compute_d(
 pub(crate) fn calc_y(
     from_asset: &DecimalAsset,
     to: &AssetInfoValidated,
-    new_amount: Decimal256,
+    mut new_amount: Decimal256,
     pools: &[DecimalAsset],
     amp: Uint64,
     target_precision: u8,
+    target_rate: Decimal,
 ) -> StdResult<Uint128> {
     if to.equal(&from_asset.info) {
         return Err(StdError::generic_err(
@@ -85,21 +88,38 @@ pub(crate) fn calc_y(
     if from_asset.amount.eq(&new_amount) {
         return Err(StdError::generic_err("The swap amount cannot be zero."));
     }
+
+    let pools = pools
+        .iter()
+        .map(|asset| {
+            (
+                &asset.info,
+                apply_rate(&asset.info, asset.amount, Decimal256::from(target_rate)),
+            )
+        })
+        .collect_vec();
+
+    if !from_asset.info.is_native_token() {
+        new_amount *= Decimal256::from(target_rate);
+    }
+
     let n_coins = Uint64::from(pools.len() as u8);
     let ann = Uint256::from(amp.checked_mul(n_coins)?.u64() / AMP_PRECISION);
     let mut sum = Decimal256::zero();
-    let pool_values = pools.iter().map(|asset| asset.amount).collect_vec();
+    let pool_values = pools.iter().map(|(_, amt)| *amt).collect_vec();
     let d = compute_d(amp, &pool_values, target_precision)?
         .to_uint256_with_precision(target_precision)?;
     let mut c = d;
-    for pool in pools {
-        let pool_amount: Decimal256 = if pool.info.eq(&from_asset.info) {
+
+    for (pool_info, pool_amount) in pools {
+        let pool_amount: Decimal256 = if pool_info == &from_asset.info {
             new_amount
-        } else if !pool.info.eq(to) {
-            pool.amount
+        } else if pool_info != to {
+            pool_amount
         } else {
             continue;
         };
+
         sum += pool_amount;
         c = c
             .checked_multiply_ratio(
@@ -117,15 +137,38 @@ pub(crate) fn calc_y(
         y = (y * y + c) / (y + y + b - d);
         if y >= y_prev {
             if y - y_prev <= Uint256::from(1u8) {
-                return Ok(y.try_into()?);
+                return Ok(inverse_rate(to, y.try_into()?, target_rate));
             }
         } else if y < y_prev && y_prev - y <= Uint256::from(1u8) {
-            return Ok(y.try_into()?);
+            return Ok(inverse_rate(to, y.try_into()?, target_rate));
         }
     }
 
     // Should definitely converge in 32 iterations.
     Err(StdError::generic_err("y is not converging"))
+}
+
+/// Applies the target rate to the amount if the asset is the LSD token.
+///
+pub(crate) fn apply_rate<R, I: Mul<R, Output = I>>(
+    asset: &AssetInfoValidated,
+    amount: I,
+    target_rate: R,
+) -> I {
+    if asset.is_native_token() {
+        amount
+    } else {
+        amount * target_rate
+    }
+}
+
+fn inverse_rate(to: &AssetInfoValidated, y: Uint128, target_rate: Decimal) -> Uint128 {
+    if to.is_native_token() {
+        y
+    } else {
+        // y / target_rate
+        y.multiply_ratio(target_rate.denominator(), target_rate.numerator())
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +238,7 @@ mod tests {
                 .collect::<Vec<DecimalAsset>>(),
             amp * Uint64::from(AMP_PRECISION),
             NATIVE_TOKEN_PRECISION,
+            Decimal::one(),
         )
         .unwrap()
         .u128();

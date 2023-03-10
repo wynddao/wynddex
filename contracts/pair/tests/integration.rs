@@ -856,6 +856,7 @@ fn create_pair_with_same_assets() {
             total_fee_bps: 0,
             protocol_fee_bps: 0,
         },
+        circuit_breaker: None,
     };
 
     let resp = router
@@ -1279,6 +1280,7 @@ fn wrong_number_of_assets() {
             total_fee_bps: 0,
             protocol_fee_bps: 0,
         },
+        circuit_breaker: None,
     };
 
     let err = router
@@ -1312,6 +1314,7 @@ fn wrong_number_of_assets() {
             total_fee_bps: 0,
             protocol_fee_bps: 0,
         },
+        circuit_breaker: None,
     };
 
     let err = router

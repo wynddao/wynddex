@@ -532,6 +532,7 @@ fn create_pair() {
                     staking_config: default_stake_config().to_stake_config(),
                     trading_starts: mock_env().block.time.seconds(),
                     fee_config: pair_config.fee_config,
+                    circuit_breaker: None,
                 })
                 .unwrap(),
                 code_id: pair_config.code_id,
