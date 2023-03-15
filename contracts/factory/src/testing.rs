@@ -35,6 +35,7 @@ fn default_stake_config() -> DefaultStakeConfig {
 fn pair_type_to_string() {
     assert_eq!(PairType::Xyk {}.to_string(), "xyk");
     assert_eq!(PairType::Stable {}.to_string(), "stable");
+    assert_eq!(PairType::Lsd {}.to_string(), "lsd");
 }
 
 #[test]
@@ -108,7 +109,7 @@ fn proper_initialization() {
         pair_configs: vec![
             PairConfig {
                 code_id: 325u64,
-                pair_type: PairType::Stable {},
+                pair_type: PairType::Lsd {},
                 fee_config: FeeConfig {
                     total_fee_bps: 100,
                     protocol_fee_bps: 10,
@@ -489,7 +490,7 @@ fn create_pair() {
         env.clone(),
         info.clone(),
         ExecuteMsg::CreatePair {
-            pair_type: PairType::Stable {},
+            pair_type: PairType::Lsd {},
             asset_infos: asset_infos.clone(),
             init_params: None,
             total_fee_bps: None,

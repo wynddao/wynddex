@@ -36,4 +36,4 @@ cw20 = { workspace = true }
 cw20-base = { workspace = true }
 wyndex-factory = { workspace = true }
 wyndex-pair = { workspace = true }
-wyndex-pair-stable = { workspace = true }
+wyndex-pair-lsd = { workspace = true }

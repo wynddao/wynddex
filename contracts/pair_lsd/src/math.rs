@@ -1,6 +1,5 @@
-use std::ops::Mul;
-
-use cosmwasm_std::{Decimal, Decimal256, Fraction, StdError, StdResult, Uint128, Uint256, Uint64};
+use crate::state::Config;
+use cosmwasm_std::{Decimal256, Fraction, StdError, StdResult, Uint128, Uint256, Uint64};
 use itertools::Itertools;
 use wyndex::asset::{AssetInfoValidated, Decimal256Ext, DecimalAsset};
 
@@ -78,7 +77,7 @@ pub(crate) fn calc_y(
     pools: &[DecimalAsset],
     amp: Uint64,
     target_precision: u8,
-    target_rate: Decimal,
+    config: &Config,
 ) -> StdResult<Uint128> {
     if to.equal(&from_asset.info) {
         return Err(StdError::generic_err(
@@ -94,13 +93,13 @@ pub(crate) fn calc_y(
         .map(|asset| {
             (
                 &asset.info,
-                apply_rate(&asset.info, asset.amount, Decimal256::from(target_rate)),
+                apply_rate_decimal(&asset.info, asset.amount, config),
             )
         })
         .collect_vec();
 
-    if !from_asset.info.is_native_token() {
-        new_amount *= Decimal256::from(target_rate);
+    if config.is_lsd(&from_asset.info) {
+        new_amount *= Decimal256::from(config.target_rate());
     }
 
     let n_coins = Uint64::from(pools.len() as u8);
@@ -137,10 +136,10 @@ pub(crate) fn calc_y(
         y = (y * y + c) / (y + y + b - d);
         if y >= y_prev {
             if y - y_prev <= Uint256::from(1u8) {
-                return Ok(inverse_rate(to, y.try_into()?, target_rate));
+                return Ok(inverse_rate(to, y.try_into()?, config));
             }
         } else if y < y_prev && y_prev - y <= Uint256::from(1u8) {
-            return Ok(inverse_rate(to, y.try_into()?, target_rate));
+            return Ok(inverse_rate(to, y.try_into()?, config));
         }
     }
 
@@ -149,25 +148,34 @@ pub(crate) fn calc_y(
 }
 
 /// Applies the target rate to the amount if the asset is the LSD token.
-///
-pub(crate) fn apply_rate<R, I: Mul<R, Output = I>>(
-    asset: &AssetInfoValidated,
-    amount: I,
-    target_rate: R,
-) -> I {
-    if asset.is_native_token() {
-        amount
+pub(crate) fn apply_rate(asset: &AssetInfoValidated, amount: Uint128, config: &Config) -> Uint128 {
+    if config.is_lsd(asset) {
+        amount * config.target_rate()
     } else {
-        amount * target_rate
+        amount
     }
 }
 
-fn inverse_rate(to: &AssetInfoValidated, y: Uint128, target_rate: Decimal) -> Uint128 {
-    if to.is_native_token() {
-        y
+/// Applies the target rate to the amount if the asset is the LSD token.
+pub(crate) fn apply_rate_decimal(
+    asset: &AssetInfoValidated,
+    amount: Decimal256,
+    config: &Config,
+) -> Decimal256 {
+    if config.is_lsd(asset) {
+        amount * Decimal256::from(config.target_rate())
     } else {
+        amount
+    }
+}
+
+fn inverse_rate(to: &AssetInfoValidated, y: Uint128, config: &Config) -> Uint128 {
+    if config.is_lsd(to) {
         // y / target_rate
-        y.multiply_ratio(target_rate.denominator(), target_rate.numerator())
+        let t = config.target_rate();
+        y.multiply_ratio(t.denominator(), t.numerator())
+    } else {
+        y
     }
 }
 

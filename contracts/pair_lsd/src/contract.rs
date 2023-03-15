@@ -23,7 +23,8 @@ use wyndex::pair::{
     add_referral, assert_max_spread, check_asset_infos, check_assets, check_cw20_in_pool,
     create_lp_token, get_share_in_assets, handle_referral, handle_reply, migration_check,
     mint_token_message, save_tmp_staking_config, take_referral, ConfigResponse, Cw20HookMsg,
-    InstantiateMsg, MigrateMsg, StablePoolParams, StablePoolUpdateParams,
+    InstantiateMsg, MigrateMsg, SpotPricePredictionResponse, SpotPriceResponse, StablePoolParams,
+    StablePoolUpdateParams,
 };
 use wyndex::pair::{
     CumulativePricesResponse, ExecuteMsg, PairInfo, PoolResponse, QueryMsg,
@@ -37,16 +38,17 @@ use crate::math::{
 };
 use crate::msg::{TargetQuery, TargetValueResponse};
 use crate::state::{
-    get_precision, store_precisions, Config, CIRCUIT_BREAKER, CONFIG, FROZEN, OWNERSHIP_PROPOSAL,
+    get_precision, store_precisions, Config, LsdData, CIRCUIT_BREAKER, CONFIG, FROZEN,
+    OWNERSHIP_PROPOSAL,
 };
 use crate::utils::{
-    accumulate_prices, adjust_precision, calc_new_prices, compute_current_amp, compute_swap,
-    select_pools, SwapResult,
+    accumulate_prices, adjust_precision, calc_spot_price, compute_current_amp, compute_swap,
+    find_spot_price, select_pools, SwapResult,
 };
 use wyndex::pair::ContractError;
 
 /// Contract name that is used for migration.
-const CONTRACT_NAME: &str = "wyndex-pair-stable";
+const CONTRACT_NAME: &str = "wyndex-pair-lsd";
 /// Contract version that is used for migration.
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -62,8 +64,9 @@ pub fn instantiate(
 ) -> Result<Response, ContractError> {
     let asset_infos = check_asset_infos(deps.api, &msg.asset_infos)?;
 
-    if asset_infos.len() > 5 || asset_infos.len() < 2 {
-        return Err(ContractError::InvalidNumberOfAssets { min: 2, max: 5 });
+    // Only 2 assets makes sense for lsd (Asset and Asset-LSD)
+    if asset_infos.len() != 2 {
+        return Err(ContractError::InvalidNumberOfAssets { min: 2, max: 2 });
     }
 
     if msg.init_params.is_none() {
@@ -78,17 +81,21 @@ pub fn instantiate(
         return Err(ContractError::IncorrectAmp { max_amp: MAX_AMP });
     }
 
-    ensure!(
-        params.target_rate_epoch <= WEEK,
-        ContractError::InvalidTargetRateEpoch {}
-    );
-    ensure!(
-        params.lsd_hub.is_none()
-            || asset_infos.len() == 2
-                && asset_infos.iter().any(|a| a.is_native_token())
-                && asset_infos.iter().any(|a| !a.is_native_token()),
-        ContractError::InvalidAssetsForTargetRate {}
-    );
+    let lsd_data: Option<LsdData> = if let Some(info) = params.lsd {
+        ensure!(
+            info.target_rate_epoch <= WEEK,
+            ContractError::InvalidTargetRateEpoch {}
+        );
+        Some(LsdData {
+            asset: info.asset.validate(deps.api)?,
+            lsd_hub: deps.api.addr_validate(&info.hub)?,
+            target_rate: Decimal::one(),
+            target_rate_epoch: info.target_rate_epoch,
+            last_target_query: 0,
+        })
+    } else {
+        None
+    };
 
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
@@ -121,7 +128,7 @@ pub fn instantiate(
             liquidity_token: Addr::unchecked(""),
             staking_addr: Addr::unchecked(""),
             asset_infos,
-            pair_type: PairType::Stable {},
+            pair_type: PairType::Lsd {},
             fee_config: msg.fee_config,
         },
         factory_addr,
@@ -133,13 +140,7 @@ pub fn instantiate(
         greatest_precision,
         cumulative_prices,
         trading_starts: msg.trading_starts,
-        lsd_hub: params
-            .lsd_hub
-            .map(|addr| deps.api.addr_validate(&addr))
-            .transpose()?,
-        target_rate: Decimal::one(),
-        target_rate_epoch: params.target_rate_epoch,
-        last_target_query: 0, // will be queried on first interaction
+        lsd: lsd_data,
     };
 
     CONFIG.save(deps.storage, &config)?;
@@ -592,25 +593,7 @@ pub fn provide_liquidity(
         })
         .collect::<Vec<_>>();
 
-    if accumulate_prices(deps.as_ref(), &env, &mut config, &old_pools)? {
-        // calculate pools with deposited balances
-        let new_pools = assets_collection
-            .into_iter()
-            .map(|(mut asset, pool)| {
-                // add deposit amount back to pool amount, so we can calculate the new price
-                asset.amount += pool;
-                asset
-            })
-            .collect::<Vec<_>>();
-        let new_prices = calc_new_prices(deps.as_ref(), &env, &config, &new_pools)?;
-        wyndex::oracle::store_price(
-            deps.storage,
-            &env,
-            &config.pair_info.asset_infos,
-            new_prices,
-        )?;
-        CONFIG.save(deps.storage, &config)?;
-    } else if save_config {
+    if accumulate_prices(deps.as_ref(), &env, &mut config, &old_pools)? || save_config {
         CONFIG.save(deps.storage, &config)?;
     }
 
@@ -699,26 +682,7 @@ pub fn withdraw_liquidity(
         .collect::<StdResult<Vec<DecimalAsset>>>()?;
 
     let save_config = update_target_rate(deps.querier, &mut config, &env)?;
-    if accumulate_prices(deps.as_ref(), &env, &mut config, &old_pools)? {
-        // calculate pools with withdrawn balances
-        let new_pools = pools
-            .into_iter()
-            .zip(refund_assets.iter())
-            .map(|(mut pool, refund)| {
-                pool.amount -= refund.amount;
-                let precision = get_precision(deps.storage, &pool.info)?;
-                pool.to_decimal_asset(precision)
-            })
-            .collect::<StdResult<Vec<DecimalAsset>>>()?;
-        let new_prices = calc_new_prices(deps.as_ref(), &env, &config, &new_pools)?;
-        wyndex::oracle::store_price(
-            deps.storage,
-            &env,
-            &config.pair_info.asset_infos,
-            new_prices,
-        )?;
-        CONFIG.save(deps.storage, &config)?;
-    } else if save_config {
+    if accumulate_prices(deps.as_ref(), &env, &mut config, &old_pools)? || save_config {
         CONFIG.save(deps.storage, &config)?;
     }
 
@@ -1001,37 +965,38 @@ pub fn swap(
         }
     }
 
-    if accumulate_prices(deps.as_ref(), &env, &mut config, &pools)? {
-        // calculate pools with deposited / withdrawn balances
-        let new_pools = pools
-            .into_iter()
-            .map(|mut pool| -> StdResult<DecimalAsset> {
-                if pool.info.equal(&offer_asset.info) {
-                    // add offer amount to pool (it was already subtracted right at the beginning)
-                    pool.amount = pool.amount.checked_add(Decimal256::with_precision(
-                        offer_asset.amount,
-                        offer_precision,
-                    )?)?;
-                } else if pool.info.equal(&ask_pool.info) {
-                    // subtract fee and return amount from ask pool
-                    let ask_precision = get_precision(deps.storage, &ask_pool.info)?;
-                    pool.amount = pool.amount.checked_sub(Decimal256::with_precision(
-                        return_amount + protocol_fee_amount,
-                        ask_precision,
-                    )?)?;
-                }
-                Ok(pool)
-            })
-            .collect::<StdResult<Vec<_>>>()?;
-        let new_prices = calc_new_prices(deps.as_ref(), &env, &config, &new_pools)?;
-        wyndex::oracle::store_price(
-            deps.storage,
-            &env,
-            &config.pair_info.asset_infos,
-            new_prices,
-        )?;
-        CONFIG.save(deps.storage, &config)?;
-    } else if save_config {
+    // if accumulate_prices(deps.as_ref(), &env, &mut config, &pools)? {
+    //     // calculate pools with deposited / withdrawn balances
+    //     let new_pools = pools
+    //         .into_iter()
+    //         .map(|mut pool| -> StdResult<DecimalAsset> {
+    //             if pool.info.equal(&offer_asset.info) {
+    //                 // add offer amount to pool (it was already subtracted right at the beginning)
+    //                 pool.amount = pool.amount.checked_add(Decimal256::with_precision(
+    //                     offer_asset.amount,
+    //                     offer_precision,
+    //                 )?)?;
+    //             } else if pool.info.equal(&ask_pool.info) {
+    //                 // subtract fee and return amount from ask pool
+    //                 let ask_precision = get_precision(deps.storage, &ask_pool.info)?;
+    //                 pool.amount = pool.amount.checked_sub(Decimal256::with_precision(
+    //                     return_amount + protocol_fee_amount,
+    //                     ask_precision,
+    //                 )?)?;
+    //             }
+    //             Ok(pool)
+    //         })
+    //         .collect::<StdResult<Vec<_>>>()?;
+    //     let new_prices = calc_new_prices(deps.as_ref(), &env, &config, &new_pools)?;
+    //     wyndex::oracle::store_price(
+    //         deps.storage,
+    //         &env,
+    //         &config.pair_info.asset_infos,
+    //         new_prices,
+    //     )?;
+    //     CONFIG.save(deps.storage, &config)?;
+    // }
+    if save_config {
         CONFIG.save(deps.storage, &config)?;
     }
 
@@ -1134,14 +1099,24 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             referral_commission,
         )?),
         QueryMsg::CumulativePrices {} => to_binary(&query_cumulative_prices(deps, env)?),
-        QueryMsg::HistoricalPrices { duration } => to_binary(&wyndex::oracle::query_historical(
-            deps,
-            &env,
-            CONFIG.load(deps.storage)?.pair_info.asset_infos,
-            duration,
-        )?),
         QueryMsg::Config {} => to_binary(&query_config(deps, env)?),
         QueryMsg::QueryComputeD {} => to_binary(&query_compute_d(deps, env)?),
+        QueryMsg::SpotPrice { offer, ask } => to_binary(&query_spot_price(deps, env, offer, ask)?),
+        QueryMsg::SpotPricePrediction {
+            offer,
+            ask,
+            max_trade,
+            target_price,
+            iterations,
+        } => to_binary(&query_spot_price_prediction(
+            deps,
+            env,
+            offer,
+            ask,
+            max_trade,
+            target_price,
+            iterations,
+        )?),
     }
 }
 
@@ -1322,7 +1297,7 @@ pub fn query_reverse_simulation(
         &pools,
         compute_current_amp(&config, &env)?,
         config.greatest_precision,
-        config.target_rate,
+        &config,
     )?;
 
     let offer_amount = new_offer_pool_amount.checked_sub(
@@ -1389,6 +1364,82 @@ pub fn query_config(deps: Deps, env: Env) -> StdResult<ConfigResponse> {
         })?),
         owner: config.owner,
     })
+}
+
+/// Returns information about cumulative prices for the assets in the pool using a [`CumulativePricesResponse`] object.
+pub fn query_spot_price(
+    deps: Deps,
+    env: Env,
+    offer: AssetInfo,
+    ask: AssetInfo,
+) -> Result<SpotPriceResponse, ContractError> {
+    let from = offer.validate(deps.api)?;
+    let to = ask.validate(deps.api)?;
+
+    let config = CONFIG.load(deps.storage)?;
+    let (assets, _) = pool_info(deps.querier, &config)?;
+    let decimal_assets = assets
+        .iter()
+        .cloned()
+        .map(|asset| {
+            let precision = get_precision(deps.storage, &asset.info)?;
+            asset.to_decimal_asset(precision)
+        })
+        .collect::<StdResult<Vec<DecimalAsset>>>()?;
+
+    let price = calc_spot_price(deps, &env, &config, &from, &to, &decimal_assets)?;
+    Ok(SpotPriceResponse { price })
+}
+
+/// Returns information about cumulative prices for the assets in the pool using a [`CumulativePricesResponse`] object.
+pub fn query_spot_price_prediction(
+    deps: Deps,
+    env: Env,
+    offer: AssetInfo,
+    ask: AssetInfo,
+    max_trade: Uint128,
+    target_price: Decimal,
+    iterations: u8,
+) -> Result<SpotPricePredictionResponse, ContractError> {
+    let from = offer.validate(deps.api)?;
+    let to = ask.validate(deps.api)?;
+
+    ensure!(
+        max_trade > Uint128::zero(),
+        ContractError::SpotPriceInvalidMaxTrade {}
+    );
+    ensure!(
+        target_price > Decimal::zero(),
+        ContractError::SpotPriceInvalidTargetPrice {}
+    );
+    ensure!(
+        iterations > 0 && iterations <= 100,
+        ContractError::SpotPriceInvalidIterations {}
+    );
+
+    let config = CONFIG.load(deps.storage)?;
+    let (assets, _) = pool_info(deps.querier, &config)?;
+    let decimal_assets = assets
+        .iter()
+        .cloned()
+        .map(|asset| {
+            let precision = get_precision(deps.storage, &asset.info)?;
+            asset.to_decimal_asset(precision)
+        })
+        .collect::<StdResult<Vec<DecimalAsset>>>()?;
+
+    let trade = find_spot_price(
+        deps,
+        &env,
+        &config,
+        from,
+        to,
+        decimal_assets,
+        max_trade,
+        target_price,
+        iterations,
+    )?;
+    Ok(SpotPricePredictionResponse { trade })
 }
 
 /// Returns the total amount of assets in the pool as well as the total amount of LP tokens currently minted.
@@ -1525,18 +1576,18 @@ fn update_target_rate(
     config: &mut Config,
     env: &Env,
 ) -> StdResult<bool> {
-    let now = env.block.time.seconds();
-    if now < config.last_target_query + config.target_rate_epoch {
-        // target rate is up to date
-        return Ok(false);
-    }
+    if let Some(lsd) = &mut config.lsd {
+        let now = env.block.time.seconds();
+        if now < lsd.last_target_query + lsd.target_rate_epoch {
+            // target rate is up to date
+            return Ok(false);
+        }
 
-    if let Some(hub) = &config.lsd_hub {
         let response: TargetValueResponse =
-            querier.query_wasm_smart(hub, &TargetQuery::TargetValue {})?;
+            querier.query_wasm_smart(&lsd.lsd_hub, &TargetQuery::TargetValue {})?;
 
-        config.target_rate = response.target_value;
-        config.last_target_query = now;
+        lsd.target_rate = response.target_value;
+        lsd.last_target_query = now;
 
         Ok(true)
     } else {

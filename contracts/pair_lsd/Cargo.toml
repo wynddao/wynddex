@@ -1,5 +1,5 @@
 [package]
-name = "wyndex-pair-stable"
+name = "wyndex-pair-lsd"
 version = { workspace = true }
 authors = ["Cosmorama <cosmorama@proton.me>"]
 edition = { workspace = true }
@@ -41,3 +41,4 @@ derivative = { workspace = true }
 proptest = { workspace = true }
 wyndex-factory = { workspace = true }
 wyndex-stake = { workspace = true }
+wyndex-pair = { workspace = true }

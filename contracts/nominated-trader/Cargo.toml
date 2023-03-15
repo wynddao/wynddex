@@ -36,5 +36,5 @@ cw20-base = { workspace = true }
 wyndex-factory = { workspace = true }
 wyndex-pair = { workspace = true }
 wyndex-multi-hop = { workspace = true }
-wyndex-pair-stable = { workspace = true }
+wyndex-pair-lsd = { workspace = true }
 wyndex-stake = { workspace = true }

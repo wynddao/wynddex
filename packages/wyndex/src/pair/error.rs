@@ -102,8 +102,18 @@ pub enum ContractError {
         "Invalid number of assets. Expected at least 2 and at most {max} assets, but got {provided}"
     )]
     TooManyAssets { max: usize, provided: usize },
+
     #[error("Contract has been frozen")]
     ContractFrozen {},
+
+    #[error("Spot price parameters incorrect - max_trade must be bigger then 0")]
+    SpotPriceInvalidMaxTrade {},
+
+    #[error("Spot price parameters incorrect - target_price must be bigger then 0")]
+    SpotPriceInvalidTargetPrice {},
+
+    #[error("Spot price parameters incorrect - iterations must be bigger then 0 and less or equal then 100")]
+    SpotPriceInvalidIterations {},
 }
 
 impl From<ContractError> for StdError {

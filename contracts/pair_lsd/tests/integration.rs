@@ -17,7 +17,7 @@ use cw20::{BalanceResponse, Cw20Coin, Cw20ExecuteMsg, Cw20QueryMsg, MinterRespon
 use cw20_base::msg::InstantiateMsg as TokenInstantiateMsg;
 use cw_multi_test::{App, ContractWrapper, Executor};
 use wyndex::querier::query_token_balance;
-use wyndex_pair_stable::math::{MAX_AMP, MAX_AMP_CHANGE, MIN_AMP_CHANGING_TIME};
+use wyndex_pair_lsd::math::{MAX_AMP, MAX_AMP_CHANGE, MIN_AMP_CHANGING_TIME};
 
 const OWNER: &str = "owner";
 
@@ -41,11 +41,11 @@ fn store_token_code(app: &mut App) -> u64 {
 fn store_pair_code(app: &mut App) -> u64 {
     let pair_contract = Box::new(
         ContractWrapper::new_with_empty(
-            wyndex_pair_stable::contract::execute,
-            wyndex_pair_stable::contract::instantiate,
-            wyndex_pair_stable::contract::query,
+            wyndex_pair_lsd::contract::execute,
+            wyndex_pair_lsd::contract::instantiate,
+            wyndex_pair_lsd::contract::query,
         )
-        .with_reply_empty(wyndex_pair_stable::contract::reply),
+        .with_reply_empty(wyndex_pair_lsd::contract::reply),
     );
 
     app.store_code(pair_contract)
@@ -90,7 +90,7 @@ fn instantiate_factory(router: &mut App, owner: &Addr) -> Addr {
         pair_configs: vec![PairConfig {
             code_id: pair_contract_code_id,
             fee_config,
-            pair_type: PairType::Stable {},
+            pair_type: PairType::Lsd {},
             is_disabled: false,
         }],
         token_code_id: token_contract_code_id,
@@ -114,7 +114,7 @@ fn instantiate_pair(router: &mut App, owner: &Addr) -> Addr {
         AssetInfo::Native("uluna".to_string()),
     ];
     let msg = FactoryExecuteMsg::CreatePair {
-        pair_type: PairType::Stable {},
+        pair_type: PairType::Lsd {},
         asset_infos: asset_infos.clone(),
         init_params: None,
         total_fee_bps: None,
@@ -130,14 +130,13 @@ fn instantiate_pair(router: &mut App, owner: &Addr) -> Addr {
     );
 
     let msg = FactoryExecuteMsg::CreatePair {
-        pair_type: PairType::Stable {},
+        pair_type: PairType::Lsd {},
         asset_infos: asset_infos.clone(),
         init_params: Some(
             to_binary(&StablePoolParams {
                 amp: 100,
                 owner: None,
-                lsd_hub: None,
-                target_rate_epoch: 0,
+                lsd: None,
             })
             .unwrap(),
         ),
@@ -219,14 +218,13 @@ fn instantiate_mixed_pair(
         AssetInfo::Token(cw20_token.to_string()),
     ];
     let msg = FactoryExecuteMsg::CreatePair {
-        pair_type: PairType::Stable {},
+        pair_type: PairType::Lsd {},
         asset_infos: asset_infos.clone(),
         init_params: Some(
             to_binary(&StablePoolParams {
                 amp: 100,
                 owner: None,
-                lsd_hub: None,
-                target_rate_epoch: 0,
+                lsd: None,
             })
             .unwrap(),
         ),
@@ -538,7 +536,7 @@ fn provide_lp_for_single_token() {
                 protocol_fee_bps: 0,
                 total_fee_bps: 0,
             },
-            pair_type: PairType::Stable {},
+            pair_type: PairType::Lsd {},
             is_disabled: false,
         }],
         token_code_id,
@@ -560,7 +558,7 @@ fn provide_lp_for_single_token() {
         .unwrap();
 
     let msg = FactoryExecuteMsg::CreatePair {
-        pair_type: PairType::Stable {},
+        pair_type: PairType::Lsd {},
         asset_infos: vec![
             AssetInfo::Token(token_x_instance.to_string()),
             AssetInfo::Token(token_y_instance.to_string()),
@@ -569,8 +567,7 @@ fn provide_lp_for_single_token() {
             to_binary(&StablePoolParams {
                 amp: 100,
                 owner: None,
-                lsd_hub: None,
-                target_rate_epoch: 0,
+                lsd: None,
             })
             .unwrap(),
         ),
@@ -861,7 +858,7 @@ fn test_compatibility_of_tokens_with_different_precision() {
                 protocol_fee_bps: 0,
                 total_fee_bps: 0,
             },
-            pair_type: PairType::Stable {},
+            pair_type: PairType::Lsd {},
             is_disabled: false,
         }],
         token_code_id,
@@ -883,7 +880,7 @@ fn test_compatibility_of_tokens_with_different_precision() {
         .unwrap();
 
     let msg = FactoryExecuteMsg::CreatePair {
-        pair_type: PairType::Stable {},
+        pair_type: PairType::Lsd {},
         asset_infos: vec![
             AssetInfo::Token(token_x_instance.to_string()),
             AssetInfo::Token(token_y_instance.to_string()),
@@ -892,8 +889,7 @@ fn test_compatibility_of_tokens_with_different_precision() {
             to_binary(&StablePoolParams {
                 amp: 100,
                 owner: None,
-                lsd_hub: None,
-                target_rate_epoch: 0,
+                lsd: None,
             })
             .unwrap(),
         ),
@@ -1309,14 +1305,13 @@ fn provide_liquidity_with_one_cw20_asset() {
         AssetInfo::Token(token2.to_string()),
     ];
     let msg = FactoryExecuteMsg::CreatePair {
-        pair_type: PairType::Stable {},
+        pair_type: PairType::Lsd {},
         asset_infos: asset_infos.clone(),
         init_params: Some(
             to_binary(&StablePoolParams {
                 amp: 100,
                 owner: None,
-                lsd_hub: None,
-                target_rate_epoch: 0,
+                lsd: None,
             })
             .unwrap(),
         ),
@@ -1513,8 +1508,7 @@ fn update_pair_config() {
             to_binary(&StablePoolParams {
                 amp: 100,
                 owner: None,
-                lsd_hub: None,
-                target_rate_epoch: 0,
+                lsd: None,
             })
             .unwrap(),
         ),

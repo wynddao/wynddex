@@ -13,7 +13,7 @@ use wyndex::factory::{
 use wyndex::fee_config::FeeConfig;
 use wyndex::pair::{
     Cw20HookMsg, ExecuteMsg as PairExecuteMsg, PairInfo, QueryMsg, SimulationResponse,
-    StablePoolParams,
+    SpotPricePredictionResponse, SpotPriceResponse, StablePoolParams, StablePoolUpdateParams,
 };
 
 use super::mock_hub;
@@ -51,6 +51,19 @@ fn store_pair(app: &mut App) -> u64 {
             crate::contract::query,
         )
         .with_reply_empty(crate::contract::reply),
+    );
+
+    app.store_code(contract)
+}
+
+fn store_xyk_pair(app: &mut App) -> u64 {
+    let contract = Box::new(
+        ContractWrapper::new_with_empty(
+            wyndex_pair::contract::execute,
+            wyndex_pair::contract::instantiate,
+            wyndex_pair::contract::query,
+        )
+        .with_reply_empty(wyndex_pair::contract::reply),
     );
 
     app.store_code(contract)
@@ -136,7 +149,8 @@ impl SuiteBuilder {
         let owner = Addr::unchecked("owner");
 
         let cw20_code_id = store_cw20(&mut app);
-        let pair_code_id = store_pair(&mut app);
+        let stable_pair_code_id = store_pair(&mut app);
+        let xyk_pair_code_id = store_xyk_pair(&mut app);
         let factory_code_id = store_factory(&mut app);
         let staking_code_id = store_staking(&mut app);
         let factory = app
@@ -144,15 +158,26 @@ impl SuiteBuilder {
                 factory_code_id,
                 owner.clone(),
                 &FactoryInstantiateMsg {
-                    pair_configs: vec![PairConfig {
-                        code_id: pair_code_id,
-                        pair_type: PairType::Stable {},
-                        fee_config: FeeConfig {
-                            total_fee_bps: self.total_fee_bps,
-                            protocol_fee_bps: self.protocol_fee_bps,
+                    pair_configs: vec![
+                        PairConfig {
+                            code_id: stable_pair_code_id,
+                            pair_type: PairType::Lsd {},
+                            fee_config: FeeConfig {
+                                total_fee_bps: self.total_fee_bps,
+                                protocol_fee_bps: self.protocol_fee_bps,
+                            },
+                            is_disabled: false,
                         },
-                        is_disabled: false,
-                    }],
+                        PairConfig {
+                            code_id: xyk_pair_code_id,
+                            pair_type: PairType::Xyk {},
+                            fee_config: FeeConfig {
+                                total_fee_bps: self.total_fee_bps,
+                                protocol_fee_bps: self.protocol_fee_bps,
+                            },
+                            is_disabled: false,
+                        },
+                    ],
                     token_code_id: cw20_code_id,
                     fee_address: None,
                     owner: owner.to_string(),
@@ -505,6 +530,17 @@ impl Suite {
         )
     }
 
+    pub fn update_config(&mut self, params: StablePoolUpdateParams) -> AnyResult<AppResponse> {
+        self.app.execute_contract(
+            Addr::unchecked("sender"),
+            self.mock_hub.clone(),
+            &PairExecuteMsg::UpdateConfig {
+                params: to_binary(&params)?,
+            },
+            &[],
+        )
+    }
+
     pub fn query_simulation(
         &self,
         pair: &Addr,
@@ -529,6 +565,44 @@ impl Suite {
             .wrap()
             .query_wasm_smart(pair.clone(), &QueryMsg::Pair {})?;
         Ok(res)
+    }
+
+    pub fn query_spot_price(
+        &self,
+        pair: &Addr,
+        offer: &AssetInfo,
+        ask: &AssetInfo,
+    ) -> AnyResult<Decimal> {
+        let res: SpotPriceResponse = self.app.wrap().query_wasm_smart(
+            pair.clone(),
+            &QueryMsg::SpotPrice {
+                offer: offer.clone(),
+                ask: ask.clone(),
+            },
+        )?;
+        Ok(res.price)
+    }
+
+    pub fn query_predict_spot_price(
+        &self,
+        pair: &Addr,
+        offer: &AssetInfo,
+        ask: &AssetInfo,
+        max_trade: Uint128,
+        target_price: Decimal,
+        iterations: u8,
+    ) -> AnyResult<Option<Uint128>> {
+        let res: SpotPricePredictionResponse = self.app.wrap().query_wasm_smart(
+            pair.clone(),
+            &QueryMsg::SpotPricePrediction {
+                offer: offer.clone(),
+                ask: ask.clone(),
+                max_trade,
+                target_price,
+                iterations,
+            },
+        )?;
+        Ok(res.trade)
     }
 
     pub fn query_balance(&self, sender: &str, denom: &str) -> AnyResult<u128> {
