@@ -31,9 +31,32 @@ pub struct Config {
     /// The block time until which trading is disabled
     pub trading_starts: u64,
 
+    pub lsd: Option<LsdData>,
+}
+
+impl Config {
+    pub fn target_rate(&self) -> Decimal {
+        match &self.lsd {
+            Some(lsd) => lsd.target_rate,
+            None => Decimal::one(),
+        }
+    }
+
+    pub fn is_lsd(&self, asset: &AssetInfoValidated) -> bool {
+        self.lsd
+            .as_ref()
+            .map(|l| &l.asset == asset)
+            .unwrap_or(false)
+    }
+}
+
+#[cw_serde]
+pub struct LsdData {
+    /// Which asset is the LSD (and thus has the target_rate)
+    pub asset: AssetInfoValidated,
     /// Address of the liquid staking hub contract for this pool.
-    /// If set, this is used to get the target value to concentrate liquidity around.
-    pub lsd_hub: Option<Addr>,
+    /// This is used to get the target value to concentrate liquidity around.
+    pub lsd_hub: Addr,
     /// The target rate to concentrate liquidity around. Defaults to `1.0`.
     /// If `lsd_hub` is set, this is updated once per `target_rate_epoch`.
     pub target_rate: Decimal,

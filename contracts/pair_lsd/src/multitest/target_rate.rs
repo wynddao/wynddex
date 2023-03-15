@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use cosmwasm_std::{assert_approx_eq, coin, Addr, Decimal, Fraction, Uint128};
 use cw_multi_test::{BankSudo, SudoMsg};
+use wyndex::pair::LsdInfo;
 use wyndex::{
     asset::{AssetInfo, AssetInfoExt},
     factory::PairType,
@@ -26,18 +27,33 @@ fn basic_provide_and_swap() {
 
     let pair = suite
         .create_pair_and_provide_liquidity(
-            PairType::Stable {},
+            PairType::Lsd {},
             Some(StablePoolParams {
                 amp: 45,
                 owner: Some("owner".to_string()),
-                lsd_hub: Some(suite.mock_hub.to_string()),
-                target_rate_epoch: DAY,
+                lsd: Some(LsdInfo {
+                    asset: wy_juno_info.clone(),
+                    hub: suite.mock_hub.to_string(),
+                    target_rate_epoch: DAY,
+                }),
             }),
             (juno_info.clone(), 150_000_000_000_000_000),
             (wy_juno_info.clone(), 100_000_000_000_000_000),
             vec![coin(150_000_000_000_000_000, "juno")],
         )
         .unwrap();
+
+    // check spot price is 1 wyJUNO -> 1.5 JUNO
+    let spot = suite
+        .query_spot_price(&pair, &wy_juno_info, &juno_info)
+        .unwrap();
+    assert_eq!(spot, Decimal::percent(150));
+
+    // check spot price is 1 JUNO -> 0.666666 wyJUNO
+    let spot = suite
+        .query_spot_price(&pair, &juno_info, &wy_juno_info)
+        .unwrap();
+    assert_eq!(spot, Decimal::from_ratio(666_667u128, 1_000_000u128));
 
     let sim = suite
         .query_simulation(&pair, wy_juno_info.with_balance(10u128), None)
@@ -89,12 +105,15 @@ fn simple_provide_liquidity() {
 
     let pair = suite
         .create_pair_and_provide_liquidity(
-            PairType::Stable {},
+            PairType::Lsd {},
             Some(StablePoolParams {
                 amp: 45,
                 owner: Some("owner".to_string()),
-                lsd_hub: Some(suite.mock_hub.to_string()),
-                target_rate_epoch: DAY,
+                lsd: Some(LsdInfo {
+                    asset: wy_juno_info.clone(),
+                    hub: suite.mock_hub.to_string(),
+                    target_rate_epoch: DAY,
+                }),
             }),
             (juno_info, 150_000_000_000_000_000),
             (wy_juno_info, 100_000_000_000_000_000),
@@ -153,12 +172,15 @@ fn provide_liquidity_multiple() {
     let pair = suite
         .create_pair(
             "owner",
-            PairType::Stable {},
+            PairType::Lsd {},
             Some(StablePoolParams {
                 amp: 45,
                 owner: Some("owner".to_string()),
-                lsd_hub: Some(suite.mock_hub.to_string()),
-                target_rate_epoch: DAY,
+                lsd: Some(LsdInfo {
+                    asset: wy_juno_info.clone(),
+                    hub: suite.mock_hub.to_string(),
+                    target_rate_epoch: DAY,
+                }),
             }),
             &[juno_info.clone(), wy_juno_info.clone()],
         )
@@ -260,12 +282,15 @@ fn provide_liquidity_changing_rate() {
 
     let pair = suite
         .create_pair_and_provide_liquidity(
-            PairType::Stable {},
+            PairType::Lsd {},
             Some(StablePoolParams {
                 amp: 45,
                 owner: Some("owner".to_string()),
-                lsd_hub: Some(suite.mock_hub.to_string()),
-                target_rate_epoch: DAY,
+                lsd: Some(LsdInfo {
+                    asset: wy_juno_info.clone(),
+                    hub: suite.mock_hub.to_string(),
+                    target_rate_epoch: DAY,
+                }),
             }),
             (juno_info.clone(), 150_000_000_000_000_000),
             (wy_juno_info, 100_000_000_000_000_000),
@@ -321,12 +346,15 @@ fn changing_target_rate() {
 
     let pair = suite
         .create_pair_and_provide_liquidity(
-            PairType::Stable {},
+            PairType::Lsd {},
             Some(StablePoolParams {
                 amp: 45,
                 owner: Some("owner".to_string()),
-                lsd_hub: Some(suite.mock_hub.to_string()),
-                target_rate_epoch: DAY,
+                lsd: Some(LsdInfo {
+                    asset: wy_juno_info.clone(),
+                    hub: suite.mock_hub.to_string(),
+                    target_rate_epoch: DAY,
+                }),
             }),
             (juno_info.clone(), 150_000_000_000_000_000),
             (wy_juno_info.clone(), 100_000_000_000_000_000),
@@ -421,12 +449,15 @@ fn drastic_rate_change() {
 
     let pair = suite
         .create_pair_and_provide_liquidity(
-            PairType::Stable {},
+            PairType::Lsd {},
             Some(StablePoolParams {
                 amp: 45,
                 owner: Some("owner".to_string()),
-                lsd_hub: Some(suite.mock_hub.to_string()),
-                target_rate_epoch: DAY,
+                lsd: Some(LsdInfo {
+                    asset: wy_juno_info.clone(),
+                    hub: suite.mock_hub.to_string(),
+                    target_rate_epoch: DAY,
+                }),
             }),
             (juno_info.clone(), 200_000_000_000_000_000),
             (wy_juno_info.clone(), 100_000_000_000_000_000),
@@ -440,13 +471,31 @@ fn drastic_rate_change() {
     assert_eq!(sim.return_amount.u128(), 200_000);
     assert_eq!(sim.spread_amount.u128(), 0);
 
+    // check spot price is 1 wyJUNO -> 2 JUNO
+    let spot = suite
+        .query_spot_price(&pair, &wy_juno_info, &juno_info)
+        .unwrap();
+    assert_eq!(spot, Decimal::percent(200));
+
     // change target rate to 1.2 and wait for cache to expire
     let target_rate = Decimal::from_atomics(12u128, 1).unwrap();
     suite.change_target_value(target_rate).unwrap();
     suite.wait(DAY);
 
+    // check spot price is still 1 wyJUNO -> 2 JUNO (shows it is not always target rate)
+    let spot = suite
+        .query_spot_price(&pair, &wy_juno_info, &juno_info)
+        .unwrap();
+    assert_eq!(spot, Decimal::percent(200));
+
     // we have too much JUNO in the pool, so we arbitrage it away
     arbitrage_to(&mut suite, &pair, &wy_juno_info, target_rate);
+
+    // check spot price is now 1 wyJUNO -> 1.2 JUNO
+    let spot = suite
+        .query_spot_price(&pair, &wy_juno_info, &juno_info)
+        .unwrap();
+    assert_eq!(spot, Decimal::percent(120));
 
     suite
         .swap(
@@ -465,14 +514,32 @@ fn drastic_rate_change() {
         "0.000002"
     );
 
+    // check spot price is slightly less 1 wyJUNO -> 1.2 JUNO
+    let spot = suite
+        .query_spot_price(&pair, &wy_juno_info, &juno_info)
+        .unwrap();
+    assert_eq!(spot, Decimal::from_atomics(1_199_999u128, 6).unwrap());
+
     // change target rate to 2.5 and wait for cache to expire
     let target_rate = Decimal::from_atomics(25u128, 1).unwrap();
     suite.change_target_value(target_rate).unwrap();
     suite.wait(DAY);
 
+    // check spot price is unchanged
+    let spot = suite
+        .query_spot_price(&pair, &wy_juno_info, &juno_info)
+        .unwrap();
+    assert_eq!(spot, Decimal::from_atomics(1_199_999u128, 6).unwrap());
+
     // we have too much wyJUNO in the pool, so we arbitrage it away
     // the next swap will fail with spread assertion if we don't
     arbitrage_to(&mut suite, &pair, &juno_info, target_rate);
+
+    // check spot price is now 1 wyJUNO -> 2.5 JUNO
+    let spot = suite
+        .query_spot_price(&pair, &wy_juno_info, &juno_info)
+        .unwrap();
+    assert_eq!(spot, Decimal::from_atomics(2_500_001u128, 6).unwrap());
 
     let prev_balance = suite.query_balance("sender", "juno").unwrap();
     suite
@@ -493,8 +560,201 @@ fn drastic_rate_change() {
     );
 }
 
+#[test]
+fn changing_spot_price() {
+    let target_rate = Decimal::from_atomics(15u128, 1).unwrap();
+    let mut suite = SuiteBuilder::new()
+        .with_funds("sender", &[coin(1_000_000_000, "juno")])
+        .with_funds("arbitrageur", &[coin(1_000_000_000, "juno")])
+        .with_initial_target_rate(target_rate)
+        .build();
+
+    let juno_info = AssetInfo::Native("juno".to_string());
+    let wy_juno = suite.instantiate_token("owner", "wyJUNO");
+    let wy_juno_info = AssetInfo::Token(wy_juno.to_string());
+
+    let pair = suite
+        .create_pair_and_provide_liquidity(
+            PairType::Lsd {},
+            Some(StablePoolParams {
+                amp: 45,
+                owner: Some("owner".to_string()),
+                lsd: Some(LsdInfo {
+                    asset: wy_juno_info.clone(),
+                    hub: suite.mock_hub.to_string(),
+                    target_rate_epoch: DAY,
+                }),
+            }),
+            (juno_info.clone(), 150_000_000),
+            (wy_juno_info.clone(), 100_000_000),
+            vec![coin(150_000_000, "juno")],
+        )
+        .unwrap();
+
+    // check spot price is about 1 wyJUNO -> 1.5 JUNO
+    let spot = suite
+        .query_spot_price(&pair, &wy_juno_info, &juno_info)
+        .unwrap();
+    assert_eq!(spot, Decimal::from_atomics(1_499_674u128, 6).unwrap());
+
+    // small swap (3% of juno) stays close to target
+    suite
+        .swap(
+            &pair,
+            "sender",
+            juno_info.with_balance(4_500_000u128),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_approx_eq!(
+        suite.query_cw20_balance("sender", &wy_juno).unwrap(),
+        3_000_000u128,
+        "0.001"
+    );
+
+    // check spot price is slightly higher than before
+    let spot = suite
+        .query_spot_price(&pair, &wy_juno_info, &juno_info)
+        .unwrap();
+    assert_eq!(spot, Decimal::from_atomics(1_501_633u128, 6).unwrap());
+
+    // big swap (double juno) changes price a lot target
+    suite
+        .swap(
+            &pair,
+            "sender",
+            juno_info.with_balance(150_000_000u128),
+            None,
+            None,
+            // allow a huge slippage...
+            Decimal::percent(50),
+            None,
+        )
+        .unwrap();
+
+    // check spot price is much larger (TODO: verify exact value with math equations)
+    let spot = suite
+        .query_spot_price(&pair, &wy_juno_info, &juno_info)
+        .unwrap();
+    assert_eq!(spot, Decimal::from_atomics(3_483_313u128, 6).unwrap());
+}
+
+#[test]
+fn predict_swap_spot_price() {
+    let iterations = 10u8;
+    let target_rate = Decimal::from_atomics(15u128, 1).unwrap();
+    let mut suite = SuiteBuilder::new()
+        .with_funds("sender", &[coin(1_000_000_000, "juno")])
+        .with_funds("arbitrageur", &[coin(1_000_000_000, "juno")])
+        .with_initial_target_rate(target_rate)
+        .build();
+
+    let juno_info = AssetInfo::Native("juno".to_string());
+    let wy_juno = suite.instantiate_token("owner", "wyJUNO");
+    let wy_juno_info = AssetInfo::Token(wy_juno.to_string());
+
+    let pair = suite
+        .create_pair_and_provide_liquidity(
+            PairType::Lsd {},
+            Some(StablePoolParams {
+                amp: 6,
+                owner: Some("owner".to_string()),
+                lsd: Some(LsdInfo {
+                    asset: wy_juno_info.clone(),
+                    hub: suite.mock_hub.to_string(),
+                    target_rate_epoch: DAY,
+                }),
+            }),
+            (juno_info.clone(), 1_500_000_000),
+            (wy_juno_info.clone(), 1_000_000_000),
+            vec![coin(1_500_000_000, "juno")],
+        )
+        .unwrap();
+
+    // check spot price is about 1 JUNO -> 0.666 wyJUNO
+    let spot = suite
+        .query_spot_price(&pair, &juno_info, &wy_juno_info)
+        .unwrap();
+    // this is within 0.01%
+    assert_approx_eq!(
+        spot * Uint128::new(1_000_000),
+        Uint128::new(666666),
+        "0.0001"
+    );
+
+    // aiming for a price above current will return None
+    let amount = Uint128::new(100_000_000);
+    let to_swap = suite
+        .query_predict_spot_price(
+            &pair,
+            &juno_info,
+            &wy_juno_info,
+            amount,
+            Decimal::percent(70),
+            iterations,
+        )
+        .unwrap();
+    assert_eq!(to_swap, None);
+
+    // aiming for a price far below current will return full amount
+    let swap_all = suite
+        .query_predict_spot_price(
+            &pair,
+            &juno_info,
+            &wy_juno_info,
+            amount,
+            Decimal::percent(60),
+            iterations,
+        )
+        .unwrap();
+    let swap_all = swap_all.unwrap();
+    assert_eq!(swap_all, amount);
+
+    // aiming for a price slightly below current will return some partial value
+    let target = Decimal::permille(656);
+    let to_swap = suite
+        .query_predict_spot_price(&pair, &juno_info, &wy_juno_info, amount, target, iterations)
+        .unwrap();
+    // must be Some
+    let to_swap = to_swap.unwrap();
+    // must be less than amount
+    assert!(to_swap < swap_all);
+
+    // verify this value does lead to proper spot price after swap
+    suite
+        .swap(
+            &pair,
+            "sender",
+            juno_info.with_balance(to_swap),
+            None,
+            None,
+            Decimal::percent(5),
+            None,
+        )
+        .unwrap();
+
+    // check spot price is very close to desired (seems to be about 0.3% above... fee?)
+    let spot = suite
+        .query_spot_price(&pair, &juno_info, &wy_juno_info)
+        .unwrap();
+    // this is within 0.01%
+    assert_approx_eq!(
+        spot * Uint128::new(1_000_000),
+        target * Uint128::new(1_000_000),
+        "0.0001"
+    );
+}
+
 /// Helper function that swaps until the target rate is reached.
-fn arbitrage_to(suite: &mut Suite, pair: &Addr, offer_asset: &AssetInfo, mut target_rate: Decimal) {
+pub fn arbitrage_to(
+    suite: &mut Suite,
+    pair: &Addr,
+    offer_asset: &AssetInfo,
+    mut target_rate: Decimal,
+) {
     if !offer_asset.is_native_token() {
         // we have too much of the lsd token, so we swap it for the native one
         // but we need to invert the rate (since it is given as native tokens / lsd tokens)

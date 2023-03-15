@@ -279,12 +279,27 @@ pub enum QueryMsg {
     /// Returns information about the cumulative prices in a [`CumulativePricesResponse`] object
     #[returns(CumulativePricesResponse)]
     CumulativePrices {},
-    /// Returns a price history of the given duration
-    #[returns(HistoricalPricesResponse)]
-    HistoricalPrices { duration: HistoryDuration },
     /// Returns current D invariant in as a [`u128`] value
     #[returns(Uint128)]
     QueryComputeD {},
+    /// Return current spot price of input in terms of output
+    #[returns(SpotPriceResponse)]
+    SpotPrice { offer: AssetInfo, ask: AssetInfo },
+    /// Returns amount of tokens that can be exchanged such that sport remains <= target_price.
+    /// The last token of offer should return target_price of ask.
+    /// Returns None if price is already above expected.
+    #[returns(SpotPricePredictionResponse)]
+    SpotPricePrediction {
+        offer: AssetInfo,
+        ask: AssetInfo,
+        /// The maximum amount of offer to be sold
+        max_trade: Uint128,
+        /// The lowest spot price any offer token should be sold at
+        target_price: Decimal,
+        /// The maximum number of iterations used to bisect the space.
+        /// (higher numbers gives more accuracy at higher gas cost)
+        iterations: u8,
+    },
 }
 
 #[cw_serde]
@@ -368,10 +383,19 @@ pub struct StablePoolParams {
     pub amp: u64,
     /// The contract owner
     pub owner: Option<String>,
+    /// Information on LSD, if supported (TODO: always require?)
+    pub lsd: Option<LsdInfo>,
+}
+
+#[cw_serde]
+pub struct LsdInfo {
+    /// Which asset is the LSD (and thus has the target_rate)
+    pub asset: AssetInfo,
 
     /// Address of the liquid staking hub contract for this pool.
-    /// If set, this is used to get the target value to concentrate liquidity around.
-    pub lsd_hub: Option<String>,
+    /// This is used to get the target value to concentrate liquidity around.
+    pub hub: String,
+
     /// The minimum amount of time in seconds between two target value queries
     pub target_rate_epoch: u64,
 }
@@ -388,4 +412,17 @@ pub struct StablePoolConfig {
 pub enum StablePoolUpdateParams {
     StartChangingAmp { next_amp: u64, next_amp_time: u64 },
     StopChangingAmp {},
+}
+
+/// This structure holds the parameters that are returned from a reverse swap simulation response.
+#[cw_serde]
+pub struct SpotPriceResponse {
+    pub price: Decimal,
+}
+
+#[cw_serde]
+pub struct SpotPricePredictionResponse {
+    /// Represents units to buy until spot price hits target (in query).
+    /// Returns None, result is already below the spot price
+    pub trade: Option<Uint128>,
 }

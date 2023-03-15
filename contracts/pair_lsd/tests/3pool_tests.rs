@@ -9,6 +9,7 @@ use crate::helper::{Helper, TestCoin};
 
 mod helper;
 
+#[ignore = "Only support 2 pools"]
 #[test]
 fn provide_and_withdraw_no_fee() {
     let owner = Addr::unchecked("owner");
@@ -131,6 +132,7 @@ fn provide_and_withdraw_no_fee() {
     assert_eq!(0, helper.coin_balance(&test_coins[2], &user3));
 }
 
+#[ignore = "Only support 2 pools"]
 #[test]
 fn provide_with_different_precision() {
     let owner = Addr::unchecked("owner");
@@ -188,6 +190,7 @@ fn provide_with_different_precision() {
     assert_eq!(100000000, helper.coin_balance(&test_coins[2], &user2));
 }
 
+#[ignore = "Only support 2 pools"]
 #[test]
 fn swap_different_precisions() {
     let owner = Addr::unchecked("owner");
@@ -237,6 +240,7 @@ fn swap_different_precisions() {
     assert_eq!(99_949011, helper.coin_balance(&test_coins[2], &user));
 }
 
+#[ignore = "Only support 2 pools"]
 #[test]
 fn check_swaps() {
     let owner = Addr::unchecked("owner");
@@ -293,7 +297,7 @@ fn check_wrong_initializations() {
     let err = Helper::new(&owner, vec![TestCoin::native("uluna")], 100u64, None).unwrap_err();
 
     assert_eq!(
-        ContractError::InvalidNumberOfAssets { min: 2, max: 5 },
+        ContractError::InvalidNumberOfAssets { min: 2, max: 2 },
         err.downcast().unwrap()
     );
 
@@ -313,17 +317,13 @@ fn check_wrong_initializations() {
     .unwrap_err();
 
     assert_eq!(
-        ContractError::InvalidNumberOfAssets { min: 2, max: 5 },
+        ContractError::InvalidNumberOfAssets { min: 2, max: 2 },
         err.downcast().unwrap()
     );
 
     let err = Helper::new(
         &owner,
-        vec![
-            TestCoin::native("uluna"),
-            TestCoin::native("uluna"),
-            TestCoin::cw20("USDC"),
-        ],
+        vec![TestCoin::native("uluna"), TestCoin::native("uluna")],
         100u64,
         None,
     )
@@ -333,23 +333,9 @@ fn check_wrong_initializations() {
         err.root_cause().to_string(),
         "Doubling assets in asset infos"
     );
-
-    // 5 assets in the pool is okay
-    Helper::new(
-        &owner,
-        vec![
-            TestCoin::native("one"),
-            TestCoin::cw20("two"),
-            TestCoin::native("three"),
-            TestCoin::cw20("four"),
-            TestCoin::native("five"),
-        ],
-        100u64,
-        None,
-    )
-    .unwrap();
 }
 
+#[ignore = "Only support 2 pools"]
 #[test]
 fn check_withdraw_charges_fees() {
     let owner = Addr::unchecked("owner");
@@ -425,6 +411,7 @@ fn check_withdraw_charges_fees() {
     );
 }
 
+#[ignore = "Only support 2 pools"]
 #[test]
 fn check_5pool_prices() {
     let owner = Addr::unchecked("owner");

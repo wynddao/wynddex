@@ -24,6 +24,8 @@ pub enum PairType {
     Xyk {},
     /// Stable pair type
     Stable {},
+    /// LSD pair type
+    Lsd {},
     /// Custom pair type
     Custom(String),
 }
@@ -34,6 +36,7 @@ impl Display for PairType {
         match self {
             PairType::Xyk {} => fmt.write_str("xyk"),
             PairType::Stable {} => fmt.write_str("stable"),
+            PairType::Lsd {} => fmt.write_str("lsd"),
             PairType::Custom(pair_type) => fmt.write_str(format!("custom-{}", pair_type).as_str()),
         }
     }

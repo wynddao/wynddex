@@ -1,4 +1,4 @@
-use cosmwasm_std::{Decimal256, Deps, Env, StdResult, Storage, Uint128, Uint64};
+use cosmwasm_std::{Decimal, Decimal256, Deps, Env, StdResult, Storage, Uint128, Uint256, Uint64};
 use itertools::Itertools;
 use std::cmp::Ordering;
 use wyndex::oracle::PricePoint;
@@ -146,7 +146,7 @@ pub(crate) fn compute_swap(
         pools,
         compute_current_amp(config, env)?,
         token_precision,
-        config.target_rate,
+        config,
     )?;
 
     let return_amount = ask_pool.amount.to_uint128_with_precision(token_precision)? - new_ask_pool;
@@ -155,10 +155,8 @@ pub(crate) fn compute_swap(
         .to_uint128_with_precision(token_precision)?;
 
     // We consider swap rate to be target_rate in stable swap thus any difference is considered as spread.
-    let spread_amount =
-        apply_rate(&offer_asset.info, offer_asset_amount, config.target_rate).saturating_sub(
-            apply_rate(&ask_pool.info, return_amount, config.target_rate),
-        );
+    let spread_amount = apply_rate(&offer_asset.info, offer_asset_amount, config)
+        .saturating_sub(apply_rate(&ask_pool.info, return_amount, config));
 
     Ok(SwapResult {
         return_amount,
@@ -223,6 +221,8 @@ pub fn accumulate_prices(
 /// an empty vector if one of the pools is empty.
 ///
 /// * **pools** array with assets available in the pool *after* the latest operation.
+// note: will be used for oracles
+#[allow(dead_code)]
 pub fn calc_new_prices(
     deps: Deps,
     env: &Env,
@@ -247,12 +247,161 @@ pub fn calc_new_prices(
                 &ask_pool,
                 pools,
             )?;
-
             prices.push(PricePoint::new(from.clone(), to.clone(), return_amount));
         }
-
         Ok(prices)
     } else {
         Ok(vec![])
     }
+}
+
+pub fn calc_spot_price(
+    deps: Deps,
+    env: &Env,
+    config: &Config,
+    offer: &AssetInfoValidated,
+    ask: &AssetInfoValidated,
+    pools: &[DecimalAsset],
+) -> Result<Decimal, ContractError> {
+    let offer_asset = DecimalAsset {
+        info: offer.clone(),
+        // This is 1 unit (adjusted for number of decimals)
+        amount: Decimal256::one(),
+    };
+    let (offer_pool, ask_pool) = select_pools(Some(offer), Some(ask), pools)?;
+
+    // try swapping one unit to see how much we get
+    let SwapResult { return_amount, .. } = compute_swap(
+        deps.storage,
+        env,
+        config,
+        &offer_asset,
+        &offer_pool,
+        &ask_pool,
+        pools,
+    )?;
+
+    // Return amount is in number of base units. To make it decimal, we must divide by precision
+    let decimals = get_precision(deps.storage, &ask_pool.info)?;
+    let price = Decimal::from_atomics(return_amount, decimals as u32).unwrap();
+    Ok(price)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn find_spot_price(
+    deps: Deps,
+    env: &Env,
+    config: &Config,
+    offer: AssetInfoValidated,
+    ask: AssetInfoValidated,
+    pools: Vec<DecimalAsset>,
+    max_trade: Uint128,
+    target_price: Decimal,
+    iterations: u8,
+) -> Result<Option<Uint128>, ContractError> {
+    // normalize the max_trade with precision
+    let decimals = get_precision(deps.storage, &offer)?;
+    let mut trade = Decimal256::from_atomics(max_trade, decimals as u32).unwrap();
+
+    // check min boundary (is price already too high)
+    let current = calc_spot_price(deps, env, config, &offer, &ask, &pools)?;
+    if current <= target_price {
+        return Ok(None);
+    }
+
+    // check max boundary (if i swap all assets, is price still good enough)
+    let max_pools = pools_after_swap(config, &offer, &ask, &pools, trade);
+    let all_in = calc_spot_price(deps, env, config, &offer, &ask, &max_pools)?;
+
+    // if this does not fit, recurse to find it (otherwise just use the max trade)
+    if all_in < target_price {
+        trade = recurse_bisect_spot_price(
+            deps,
+            env,
+            config,
+            &offer,
+            &ask,
+            &pools,
+            Decimal256::zero(),
+            trade,
+            target_price,
+            iterations,
+        )?;
+    }
+
+    let amount = trade * Uint256::from(10_u128.pow(decimals as u32));
+    Ok(Some(amount.try_into().unwrap()))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn recurse_bisect_spot_price(
+    deps: Deps,
+    env: &Env,
+    config: &Config,
+    offer: &AssetInfoValidated,
+    ask: &AssetInfoValidated,
+    pools: &[DecimalAsset],
+    min_trade: Decimal256,
+    max_trade: Decimal256,
+    target_price: Decimal,
+    iterations: u8,
+) -> Result<Decimal256, ContractError> {
+    // at the end, return mid-point
+    let half = (min_trade + max_trade) / Decimal256::percent(200);
+    if iterations == 0 {
+        return Ok(half);
+    }
+
+    // find price at midpoint
+    let mid_pools = pools_after_swap(config, offer, ask, pools, half);
+    let mid_price = calc_spot_price(deps, env, config, offer, ask, &mid_pools)?;
+    // and refine bounds up or down
+    let (min_trade, max_trade) = match mid_price.cmp(&target_price) {
+        std::cmp::Ordering::Equal => return Ok(half),
+        std::cmp::Ordering::Greater => (half, max_trade),
+        std::cmp::Ordering::Less => (min_trade, half),
+    };
+
+    // recurse with one less iteration
+    recurse_bisect_spot_price(
+        deps,
+        env,
+        config,
+        offer,
+        ask,
+        pools,
+        min_trade,
+        max_trade,
+        target_price,
+        iterations - 1,
+    )
+}
+
+/// Pretend we swapped amount from token into to token.
+/// Return the pools value as if this happened to use for future calculations
+fn pools_after_swap(
+    config: &Config,
+    offer: &AssetInfoValidated,
+    ask: &AssetInfoValidated,
+    pools: &[DecimalAsset],
+    mut amount: Decimal256,
+) -> Vec<DecimalAsset> {
+    pools
+        .iter()
+        .cloned()
+        .map(|mut asset| {
+            if config.is_lsd(&asset.info) {
+                amount /= Decimal256::from(config.target_rate());
+            }
+            if &asset.info == offer {
+                asset.amount += amount;
+                asset
+            } else if &asset.info == ask {
+                asset.amount -= amount;
+                asset
+            } else {
+                asset
+            }
+        })
+        .collect()
 }

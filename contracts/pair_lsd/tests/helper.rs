@@ -18,7 +18,7 @@ use wyndex::pair::{
     ReverseSimulationResponse, SimulationResponse, StablePoolParams,
 };
 use wyndex::querier::NATIVE_TOKEN_PRECISION;
-use wyndex_pair_stable::contract::{execute, instantiate, query, reply};
+use wyndex_pair_lsd::contract::{execute, instantiate, query, reply};
 
 const INIT_BALANCE: u128 = 1_000_000_000_000;
 
@@ -156,7 +156,7 @@ impl Helper {
                     protocol_fee_bps: 5000,
                     total_fee_bps: swap_fee.unwrap_or(5u16),
                 },
-                pair_type: PairType::Stable {},
+                pair_type: PairType::Lsd {},
                 is_disabled: false,
             }],
             token_code_id,
@@ -187,14 +187,13 @@ impl Helper {
             .map(|(_, asset_info)| asset_info)
             .collect_vec();
         let init_pair_msg = wyndex::factory::ExecuteMsg::CreatePair {
-            pair_type: PairType::Stable {},
+            pair_type: PairType::Lsd {},
             asset_infos: asset_infos.clone(),
             init_params: Some(
                 to_binary(&StablePoolParams {
                     amp,
                     owner: None,
-                    lsd_hub: None,
-                    target_rate_epoch: 0,
+                    lsd: None,
                 })
                 .unwrap(),
             ),
