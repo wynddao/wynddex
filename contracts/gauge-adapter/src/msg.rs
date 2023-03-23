@@ -22,6 +22,7 @@ pub enum ExecuteMsg {
 pub enum MigrateMsg {
     /// Used to instantiate from cw-placeholder
     Init(InstantiateMsg),
+    Update {},
 }
 
 // Queries copied from gauge-orchestrator for now (we could use a common crate for this)
