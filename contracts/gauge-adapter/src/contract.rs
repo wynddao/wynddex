@@ -210,6 +210,7 @@ pub fn migrate(deps: DepsMut, env: Env, msg: MigrateMsg) -> Result<Response, Con
             )
             .unwrap();
         }
+        MigrateMsg::Update {} => {}
     };
 
     Ok(Response::new())
