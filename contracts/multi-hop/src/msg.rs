@@ -174,3 +174,6 @@ pub struct SimulateSwapOperationsResponse {
     /// The absolute amount of referral commission. This is always denominated in `offer_asset_info`.
     pub referral_amount: AssetValidated,
 }
+
+#[cw_serde]
+pub struct MigrateMsg {}
