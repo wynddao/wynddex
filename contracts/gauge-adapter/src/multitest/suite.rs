@@ -13,10 +13,9 @@ use wyndex::factory::{
 };
 use wyndex::fee_config::FeeConfig;
 use wyndex::pair::{ExecuteMsg as PairExecuteMsg, PairInfo, QueryMsg as PairQueryMsg};
-use wyndex::stake::UnbondingPeriod;
+use wyndex::stake::{ReceiveMsg, UnbondingPeriod};
 use wyndex_stake::msg::{
-    ExecuteMsg as StakingExecuteMsg, QueryMsg as StakingQueryMsg, ReceiveDelegationMsg,
-    WithdrawableRewardsResponse,
+    ExecuteMsg as StakingExecuteMsg, QueryMsg as StakingQueryMsg, WithdrawableRewardsResponse,
 };
 
 use crate::msg::{
@@ -110,6 +109,7 @@ impl SuiteBuilder {
                 min_bond: Uint128::new(1000),
                 unbonding_periods: vec![],
                 max_distributions: 6,
+                converter: None,
             },
             reward: Asset {
                 amount: Uint128::zero(),
@@ -621,7 +621,7 @@ impl StakingContract {
             &Cw20ExecuteMsg::Send {
                 contract: self.0.to_string(),
                 amount: amount.into(),
-                msg: to_binary(&ReceiveDelegationMsg::Delegate {
+                msg: to_binary(&ReceiveMsg::Delegate {
                     unbonding_period,
                     delegate_as: None,
                 })

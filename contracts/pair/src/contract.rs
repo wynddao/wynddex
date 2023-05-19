@@ -17,7 +17,6 @@ use wyndex::asset::{
 use wyndex::decimal2decimal256;
 use wyndex::factory::{ConfigResponse as FactoryConfig, PairType};
 use wyndex::fee_config::FeeConfig;
-
 use wyndex::pair::{
     add_referral, assert_max_spread, check_asset_infos, check_assets, check_cw20_in_pool,
     create_lp_token, get_share_in_assets, handle_referral, handle_reply, migration_check,
@@ -459,6 +458,18 @@ pub fn provide_liquidity(
         share,
     )?);
 
+    // Calculate new pool amounts
+    let new_pool0 = pools[0].amount + deposits[0].amount;
+    let new_pool1 = pools[1].amount + deposits[1].amount;
+
+    let price = Decimal::from_ratio(new_pool0, new_pool1);
+    if total_share.is_zero() {
+        // initialize oracle storage
+        wyndex::oracle::initialize_oracle(deps.storage, &env, price)?;
+    } else {
+        wyndex::oracle::store_oracle_price(deps.storage, &env, price)?;
+    }
+
     // Accumulate prices for the assets in the pool
     if let Some((price0_cumulative_new, price1_cumulative_new, block_time)) =
         accumulate_prices(&env, &config, pools[0].amount, pools[1].amount)?
@@ -497,6 +508,18 @@ pub fn withdraw_liquidity(
 
     let (pools, total_share) = pool_info(deps.querier, &config)?;
     let refund_assets = get_share_in_assets(&pools, amount, total_share);
+
+    // Calculate new pool amounts
+    let mut new_pools = pools
+        .iter()
+        .zip(refund_assets.iter())
+        .map(|(p, r)| p.amount - r.amount);
+    let (new_pool0, new_pool1) = (new_pools.next().unwrap(), new_pools.next().unwrap());
+    wyndex::oracle::store_oracle_price(
+        deps.storage,
+        &env,
+        Decimal::from_ratio(new_pool0, new_pool1),
+    )?;
 
     // Accumulate prices for the pair assets
     if let Some((price0_cumulative_new, price1_cumulative_new, block_time)) =
@@ -719,6 +742,27 @@ fn do_swap(
         }
     }
 
+    // Calculate new pool amounts
+    let (new_pool0, new_pool1) = if pools[0].info.equal(&ask_pool.info) {
+        // subtract fee and return amount from ask pool
+        // add offer amount to offer pool
+        (
+            pools[0].amount - protocol_fee_amount - return_amount,
+            pools[1].amount + offer_amount,
+        )
+    } else {
+        // same as above, but with inverted indices
+        (
+            pools[0].amount + offer_amount,
+            pools[1].amount - protocol_fee_amount - return_amount,
+        )
+    };
+    wyndex::oracle::store_oracle_price(
+        deps.storage,
+        env,
+        Decimal::from_ratio(new_pool0, new_pool1),
+    )?;
+
     // Accumulate prices for the assets in the pool
     if let Some((price0_cumulative_new, price1_cumulative_new, block_time)) =
         accumulate_prices(env, config, pools[0].amount, pools[1].amount)?
@@ -856,6 +900,18 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             referral_commission,
         )?),
         QueryMsg::CumulativePrices {} => to_binary(&query_cumulative_prices(deps, env)?),
+        QueryMsg::Twap {
+            duration,
+            start_age,
+            end_age,
+        } => to_binary(&wyndex::oracle::query_oracle_range(
+            deps.storage,
+            &env,
+            &CONFIG.load(deps.storage)?.pair_info.asset_infos,
+            duration,
+            start_age,
+            end_age,
+        )?),
         QueryMsg::Config {} => to_binary(&query_config(deps)?),
         _ => Err(StdError::generic_err("Query is not supported")),
     }

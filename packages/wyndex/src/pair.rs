@@ -4,6 +4,8 @@ use crate::{
     asset::{Asset, AssetInfo, AssetInfoValidated, AssetValidated, DecimalAsset},
     factory::{ConfigResponse as FactoryConfigResponse, QueryMsg as FactoryQueryMsg},
     fee_config::FeeConfig,
+    oracle::{SamplePeriod, TwapResponse},
+    stake::ConverterConfig,
 };
 
 use cosmwasm_std::{
@@ -130,6 +132,8 @@ pub struct StakeConfig {
     pub min_bond: Uint128,
     pub unbonding_periods: Vec<u64>,
     pub max_distributions: u32,
+    /// Optional converter configuration for the staking contract
+    pub converter: Option<ConverterConfig>,
 }
 
 impl StakeConfig {
@@ -155,6 +159,7 @@ impl StakeConfig {
                 max_distributions: self.max_distributions,
                 admin: Some(factory_addr),
                 unbonder: None, // TODO: allow specifying unbonder
+                converter: self.converter,
             })?,
             funds: vec![],
             admin: Some(factory_owner),
@@ -279,6 +284,15 @@ pub enum QueryMsg {
     /// Returns information about the cumulative prices in a [`CumulativePricesResponse`] object
     #[returns(CumulativePricesResponse)]
     CumulativePrices {},
+    /// Returns a price history of the given duration
+    #[returns(TwapResponse)]
+    Twap {
+        duration: SamplePeriod,
+        /// duration: Day and start_age: 3 means to start from first checkpoint 3 days ago
+        start_age: u32,
+        /// end_age: None means count until the current time, end_age: Some(0) means til the last checkpoint, which would be more regular
+        end_age: Option<u32>,
+    },
     /// Returns current D invariant in as a [`u128`] value
     #[returns(Uint128)]
     QueryComputeD {},
@@ -300,13 +314,6 @@ pub enum QueryMsg {
         /// (higher numbers gives more accuracy at higher gas cost)
         iterations: u8,
     },
-}
-
-#[cw_serde]
-pub enum HistoryDuration {
-    FifteenMinutes,
-    Day,
-    Week,
 }
 
 /// This struct is used to return a query result with the total amount of LP tokens and assets in a specific pool.
@@ -364,16 +371,6 @@ pub struct CumulativePricesResponse {
     pub total_share: Uint128,
     /// The vector contains cumulative prices for each pair of assets in the pool
     pub cumulative_prices: Vec<(AssetInfoValidated, AssetInfoValidated, Uint128)>,
-}
-
-pub type TimeSeries = Vec<(u64, Uint128)>;
-
-/// This structure is used to return a historical prices query response.
-#[cw_serde]
-pub struct HistoricalPricesResponse {
-    /// The vector contains historical prices for each pair of assets in the pool
-    /// The first element of the tuple is the offer asset, the second element is the ask asset
-    pub historical_prices: Vec<(AssetInfoValidated, AssetInfoValidated, TimeSeries)>,
 }
 
 /// This structure holds stableswap pool parameters.

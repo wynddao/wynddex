@@ -11,4 +11,7 @@ pub enum ContractError {
 
     #[error("Can only init upgrade from cw-placeholder")]
     NotPlaceholder,
+
+    #[error("Funding distribution duration cannot be zero")]
+    ZeroDistributionDuration {},
 }

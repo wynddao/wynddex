@@ -40,3 +40,7 @@ cosmwasm-schema = { workspace = true }
 # standard libs
 anyhow = { workspace = true }
 test-case = { workspace = true }
+lp-converter = { workspace = true, features = ["library"] }
+# migration test
+wyndex-stake-2_0_0 = { package = "wyndex-stake", git = "https://github.com/wynddao/wynddex", tag = "v2.0.2" }
+wyndex-2_0_0 = { package = "wyndex", git = "https://github.com/wynddao/wynddex", tag = "v2.0.2" }

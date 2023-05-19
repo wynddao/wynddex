@@ -630,7 +630,7 @@ pub fn deregister_pool_and_staking(
                             .unwrap_or_default()
                             .iter()
                             .cloned()
-                            .filter(|pair| pair != &pair_addr)
+                            .filter(|pair| pair != pair_addr)
                             .collect::<Vec<_>>())
                     },
                 )?;

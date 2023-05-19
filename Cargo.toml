@@ -2,7 +2,7 @@
 members = ["packages/*", "contracts/*", "tests", "utils/*"]
 
 [workspace.package]
-version = "2.0.3"
+version = "2.1.0"
 edition = "2021"
 license = "GPL 3.0"
 repository = "https://github.com/cosmorama/wynddex"
@@ -18,10 +18,15 @@ wyndex-pair = { path = "./contracts/pair" }
 wyndex-pair-lsd = { path = "./contracts/pair_lsd" }
 wyndex-multi-hop = { path = "./contracts/multi-hop" }
 wyndex-stake = { path = "./contracts/stake" }
+wynd-lsd-hub = { git = "https://github.com/wynddao/wynd-lsd.git", version = "1.2.1", features = [
+    "library",
+] }
+lp-converter = { path = "./contracts/lp-converter", features = ["library"] }
 cosmwasm-schema = "1.1"
 cosmwasm-std = "1.1"
 cw2 = "1.0"
 cw20 = "1.0"
+semver                  = "1"
 cw-controllers = "1.0"
 cw-multi-test = "0.16"
 cw-storage-plus = "1.0"
@@ -33,6 +38,9 @@ serde = { version = "1", default-features = false, features = ["derive"] }
 thiserror = "1"
 test-case = "2.2.1"
 uint = "0.9"
+wyndex-stake-2_0_0 = { package = "wyndex-stake", git = "https://github.com/wynddao/wynddex", tag = "v2.1.0" }
+#wyndex-2_0_0 = { package = "wyndex", git = "https://github.com/wynddao/wynddex", version = "2.0.2" }
+
 
 [profile.release.package.wyndex-factory]
 codegen-units = 1
@@ -67,6 +75,10 @@ codegen-units = 1
 incremental = false
 
 [profile.release.package.raw-migration]
+codegen-units = 1
+incremental = false
+
+[profile.release.package.lp-converter]
 codegen-units = 1
 incremental = false
 

@@ -10,7 +10,7 @@ use crate::msg::{
 };
 use crate::state::{
     Config, Distribution, WithdrawAdjustment, CONFIG, DELEGATED, DISTRIBUTION, REWARD_CURVE,
-    SHARES_SHIFT, WITHDRAW_ADJUSTMENT,
+    SHARES_SHIFT, UNBOND_ALL, WITHDRAW_ADJUSTMENT,
 };
 
 pub fn execute_distribute_rewards(
@@ -19,6 +19,12 @@ pub fn execute_distribute_rewards(
     info: MessageInfo,
     sender: Option<String>,
 ) -> Result<Response, ContractError> {
+    if UNBOND_ALL.load(deps.storage)? {
+        return Err(ContractError::CannotDistributeIfUnbondAll {
+            what: "rewards".into(),
+        });
+    }
+
     let sender = sender
         .map(|sender| deps.api.addr_validate(&sender))
         .transpose()?

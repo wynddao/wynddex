@@ -16,6 +16,7 @@ fn native_rewards_work() {
             min_bond: 1000u128.into(),
             unbonding_periods: vec![SECONDS_PER_DAY * 7],
             max_distributions: 5,
+            converter: None,
         })
         .with_native_reward(100_000, "juno")
         .build();
@@ -157,6 +158,7 @@ fn cw20_rewards_work_direct() {
             min_bond: 1000u128.into(),
             unbonding_periods: vec![SECONDS_PER_DAY * 7],
             max_distributions: 5,
+            converter: None,
         })
         .with_cw20_reward(100)
         .build();
@@ -175,6 +177,7 @@ fn cw20_rewards_work_via_migration() {
             min_bond: 1000u128.into(),
             unbonding_periods: vec![SECONDS_PER_DAY * 7],
             max_distributions: 5,
+            converter: None,
         })
         .with_cw20_reward(100)
         .via_placeholder()

@@ -46,7 +46,7 @@ pub enum ExecuteMsg {
     ExecuteSwapOperations {
         /// All swap operations to perform
         operations: Vec<SwapOperation>,
-        /// Guarantee that the ask amount is above a minimum amount
+        /// Guarantee that the ask amount is above or equal to a minimum amount
         minimum_receive: Option<Uint128>,
         /// Recipient of the ask tokens
         receiver: Option<String>,

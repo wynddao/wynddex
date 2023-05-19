@@ -8,11 +8,9 @@ use cw2::set_contract_version;
 use cw20::Cw20ExecuteMsg;
 
 use cw_placeholder::contract::CONTRACT_NAME as PLACEHOLDER_CONTRACT_NAME;
-use wynd_curve_utils::ScalableCurve;
 use wyndex::asset::{AssetInfoValidated, AssetValidated};
-use wyndex_stake::msg::{
-    ExecuteMsg as StakeExecuteMsg, ReceiveDelegationMsg as StakeReceiveDelegationMsg,
-};
+use wyndex::stake::{FundingInfo, ReceiveMsg as StakeReceiveDelegationMsg};
+use wyndex_stake::msg::ExecuteMsg as StakeExecuteMsg;
 
 use crate::error::ContractError;
 use crate::msg::{AdapterQueryMsg, ExecuteMsg, InstantiateMsg, MigrateMsg};
@@ -31,11 +29,15 @@ pub fn instantiate(
 ) -> Result<Response, ContractError> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
+    if msg.epoch_length == 0u64 {
+        return Err(ContractError::ZeroDistributionDuration {});
+    };
+
     let config = Config {
         factory: deps.api.addr_validate(&msg.factory)?,
         owner: deps.api.addr_validate(&msg.owner)?,
         rewards_asset: msg.rewards_asset.validate(deps.api)?,
-        distribution_curve: ScalableCurve::linear((0, 100), (msg.epoch_length, 0)),
+        distribution_duration: msg.epoch_length,
     };
     CONFIG.save(deps.storage, &config)?;
 
@@ -127,8 +129,9 @@ mod query {
             factory: _,
             owner: _,
             rewards_asset,
-            distribution_curve,
+            distribution_duration,
         } = CONFIG.load(deps.storage)?;
+
         Ok(SampleGaugeMsgsResponse {
             execute: selected
                 .into_iter()
@@ -137,7 +140,7 @@ mod query {
                         info: rewards_asset.info.clone(),
                         amount: rewards_asset.amount * weight,
                     };
-                    create_distribute_msgs(&env, rewards_asset, option, distribution_curve.clone())
+                    create_distribute_msgs(&env, rewards_asset, option, distribution_duration)
                         .unwrap()
                 })
                 .collect(),
@@ -147,23 +150,28 @@ mod query {
 
 /// Creates the necessary messages to distribute the given asset to the given staking contract
 fn create_distribute_msgs(
-    _env: &Env,
+    env: &Env,
     asset: AssetValidated,
     staking_contract: String,
-    curve: ScalableCurve,
+    distribution_duration: u64,
 ) -> Result<Vec<CosmosMsg>, ContractError> {
     if asset.amount.is_zero() {
         return Ok(vec![]);
     }
+    let funding_info = FundingInfo {
+        // start time is set equal to execution time.
+        start_time: env.block.time.seconds(),
+        amount: asset.amount,
+        distribution_duration,
+    };
+
     match &asset.info {
         AssetInfoValidated::Token(_) => Ok(vec![WasmMsg::Execute {
             contract_addr: asset.info.to_string(),
             msg: to_binary(&Cw20ExecuteMsg::Send {
                 contract: staking_contract,
                 amount: asset.amount,
-                msg: to_binary(&StakeReceiveDelegationMsg::Fund {
-                    curve: curve.scale(asset.amount),
-                })?,
+                msg: to_binary(&StakeReceiveDelegationMsg::Fund { funding_info })?,
             })?,
             funds: vec![],
         }
@@ -172,9 +180,7 @@ fn create_distribute_msgs(
             let funds = coins(asset.amount.u128(), denom);
             Ok(vec![WasmMsg::Execute {
                 contract_addr: staking_contract,
-                msg: to_binary(&StakeExecuteMsg::FundDistribution {
-                    curve: curve.scale(asset.amount),
-                })?,
+                msg: to_binary(&StakeExecuteMsg::FundDistribution { funding_info })?,
                 funds,
             }
             .into()])
@@ -220,9 +226,9 @@ pub fn migrate(deps: DepsMut, env: Env, msg: MigrateMsg) -> Result<Response, Con
 mod tests {
     use cosmwasm_std::{
         testing::{mock_dependencies, mock_env, mock_info},
-        to_binary, Coin, CosmosMsg, Decimal, WasmMsg,
+        to_binary, Coin, CosmosMsg, Decimal, Uint128, WasmMsg,
     };
-    use wynd_curve_utils::Curve;
+    use wyndex::stake::FundingInfo;
 
     use super::{execute, instantiate, query};
     use crate::{
@@ -238,15 +244,31 @@ mod tests {
     fn proper_initialization() {
         let mut deps = mock_dependencies();
         let amount = 1000u64;
-        let msg = InstantiateMsg {
+        let mut msg = InstantiateMsg {
             factory: "factory".to_string(),
             owner: "owner".to_string(),
             rewards_asset: wyndex::asset::Asset {
                 info: wyndex::asset::AssetInfo::Native("juno".to_string()),
                 amount: amount.into(),
             },
-            epoch_length: EPOCH_LENGTH,
+            epoch_length: 0u64,
         };
+
+        let err = instantiate(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("user", &[]),
+            msg.clone(),
+        )
+        .unwrap_err();
+
+        assert_eq!(ContractError::ZeroDistributionDuration {}, err,);
+
+        msg = InstantiateMsg {
+            epoch_length: EPOCH_LENGTH,
+            ..msg
+        };
+
         instantiate(deps.as_mut(), mock_env(), mock_info("user", &[]), msg).unwrap();
 
         // check if the config is stored
@@ -257,6 +279,7 @@ mod tests {
             wyndex::asset::AssetInfoValidated::Native("juno".to_string())
         );
         assert_eq!(config.rewards_asset.amount.u128(), 1000);
+        assert_eq!(config.distribution_duration, EPOCH_LENGTH);
     }
 
     #[test]
@@ -292,7 +315,11 @@ mod tests {
             CosmosMsg::Wasm(WasmMsg::Execute {
                 contract_addr: "juno1555".to_string(),
                 msg: to_binary(&wyndex_stake::msg::ExecuteMsg::FundDistribution {
-                    curve: Curve::saturating_linear((0, 4160u128), (EPOCH_LENGTH, 0)),
+                    funding_info: FundingInfo {
+                        start_time: mock_env().block.time.seconds(),
+                        distribution_duration: EPOCH_LENGTH,
+                        amount: Uint128::from(4160u128)
+                    }
                 })
                 .unwrap(),
                 funds: vec![Coin {
@@ -306,7 +333,11 @@ mod tests {
             CosmosMsg::Wasm(WasmMsg::Execute {
                 contract_addr: "juno1444".to_string(),
                 msg: to_binary(&wyndex_stake::msg::ExecuteMsg::FundDistribution {
-                    curve: Curve::saturating_linear((0, 3330u128), (EPOCH_LENGTH, 0)),
+                    funding_info: FundingInfo {
+                        start_time: mock_env().block.time.seconds(),
+                        distribution_duration: EPOCH_LENGTH,
+                        amount: Uint128::from(3330u128)
+                    }
                 })
                 .unwrap(),
                 funds: vec![Coin {
@@ -320,7 +351,11 @@ mod tests {
             CosmosMsg::Wasm(WasmMsg::Execute {
                 contract_addr: "juno1333".to_string(),
                 msg: to_binary(&wyndex_stake::msg::ExecuteMsg::FundDistribution {
-                    curve: Curve::saturating_linear((0, 2500u128), (EPOCH_LENGTH, 0)),
+                    funding_info: FundingInfo {
+                        start_time: mock_env().block.time.seconds(),
+                        distribution_duration: EPOCH_LENGTH,
+                        amount: Uint128::from(2500u128)
+                    }
                 })
                 .unwrap(),
                 funds: vec![Coin {

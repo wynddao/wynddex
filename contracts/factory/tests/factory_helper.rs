@@ -100,6 +100,7 @@ impl FactoryHelper {
                 min_bond: Uint128::new(1000),
                 unbonding_periods: vec![1, 2, 3],
                 max_distributions: 6,
+                converter: None,
             },
             trading_starts: None,
         };

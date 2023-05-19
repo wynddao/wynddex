@@ -129,7 +129,7 @@ pub fn migrate_tokens(
     // ensure the requested target pool is valid
     let w_pool = deps.api.addr_validate(&wynddex_pool)?;
     if let Some(ref target) = migration.wynddex_pool {
-        if target != &w_pool {
+        if target != w_pool {
             return Err(ContractError::InvalidDestination(wynddex_pool));
         }
     }
@@ -231,7 +231,7 @@ pub fn migrate_stakers(
     let batch_lp: Uint128 = staker_lps.iter().map(|(_, x)| x).sum();
 
     // bonding has full info on who receives the delegation
-    let bond_msg = wyndex_stake::msg::ReceiveDelegationMsg::MassDelegate {
+    let bond_msg = wyndex::stake::ReceiveMsg::MassDelegate {
         unbonding_period: migration.unbonding_period,
         delegate_to: staker_lps,
     };

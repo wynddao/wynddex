@@ -2,8 +2,8 @@ use cosmwasm_std::{assert_approx_eq, Addr, Decimal, Uint128};
 use cw20::{Cw20Coin, MinterResponse};
 use cw20_base::msg::InstantiateMsg as Cw20InstantiateMsg;
 use cw_multi_test::Executor;
-use wynd_curve_utils::{Curve, PiecewiseLinear};
 use wyndex::asset::{AssetInfo, AssetInfoExt, AssetInfoValidated};
+use wyndex::stake::FundingInfo;
 
 use super::suite::{contract_token, SuiteBuilder};
 use crate::{
@@ -979,11 +979,17 @@ fn apr_cw20() {
 
     // fund the distribution flow - 1_000_000 JUNO for a year
     const YEAR: u64 = 365 * 24 * 60 * 60;
+
+    let curr_block = suite.app.block_info().time;
     suite
         .execute_fund_distribution_with_cw20_curve(
             distributor,
             cw20_info.with_balance(1_000_000_000_000_000u128),
-            Curve::saturating_linear((0, 1_000_000_000_000_000), (YEAR, 0)),
+            FundingInfo {
+                start_time: curr_block.seconds(),
+                distribution_duration: YEAR,
+                amount: Uint128::from(1_000_000_000_000_000u128),
+            },
         )
         .unwrap();
 
@@ -1044,6 +1050,8 @@ fn apr_cw20() {
     assert_eq!(annual_rewards[1].1[0].amount, Some(Decimal::zero()));
     assert_eq!(annual_rewards[2].1[0].amount, Some(Decimal::zero()));
 
+    // Following code should be removed if the code is not generalized for piecewise linear
+    /*
     // fund with a complex piecewise linear curve
     suite
         .execute_fund_distribution_with_cw20_curve(
@@ -1124,6 +1132,7 @@ fn apr_cw20() {
         annual_rewards[2].1[0].amount.unwrap() * Uint128::new(1_000_000),
         Uint128::new(1666666),
     );
+    */
 }
 
 #[test]

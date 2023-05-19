@@ -220,7 +220,7 @@ fn swap_different_precisions() {
     // And reverse swap as well
     let reverse_sim_resp = helper
         .simulate_reverse_swap(
-            &helper.assets[&test_coins[2]].with_balance(sim_resp.return_amount.u128()),
+            helper.assets[&test_coins[2]].with_balance(sim_resp.return_amount.u128()),
             Some(helper.assets[&test_coins[0]].clone()),
         )
         .unwrap();

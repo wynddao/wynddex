@@ -176,6 +176,7 @@ fn default_stake_config(staking_code_id: u64) -> DefaultStakeConfig {
         min_bond: Uint128::new(1000),
         unbonding_periods: vec![1],
         max_distributions: 6,
+        converter: None,
     }
 }
 

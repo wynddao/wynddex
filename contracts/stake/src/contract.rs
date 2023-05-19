@@ -3,34 +3,35 @@ use std::collections::HashMap;
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    from_slice, to_binary, Addr, Binary, Decimal, Deps, DepsMut, Empty, Env, MessageInfo, Order,
-    Response, StdError, StdResult, Storage, SubMsg, Uint128, WasmMsg,
+    ensure_eq, from_slice, to_binary, Addr, Binary, Decimal, Deps, DepsMut, Empty, Env,
+    MessageInfo, Order, Response, StdError, StdResult, Storage, Uint128, WasmMsg,
 };
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 use cw_controllers::Claim;
 use cw_storage_plus::Map;
 use wyndex::asset::{addr_opt_validate, AssetInfo, AssetInfoValidated};
 use wyndex::common::validate_addresses;
-use wyndex::stake::{InstantiateMsg, UnbondingPeriod};
+use wyndex::lp_converter::ExecuteMsg as ConverterExecuteMsg;
+use wyndex::stake::{FundingInfo, InstantiateMsg, ReceiveMsg, UnbondingPeriod};
 
 use crate::distribution::{
     apply_points_correction, execute_delegate_withdrawal, execute_distribute_rewards,
     execute_withdraw_rewards, query_delegated, query_distributed_rewards, query_distribution_data,
     query_undistributed_rewards, query_withdraw_adjustment_data, query_withdrawable_rewards,
 };
-use crate::utils::CurveExt;
+use crate::utils::{create_undelegate_msg, CurveExt};
 use cw2::set_contract_version;
 use cw_utils::{ensure_from_older_version, maybe_addr, Expiration};
 
 use crate::error::ContractError;
 use crate::msg::{
     AllStakedResponse, AnnualizedReward, AnnualizedRewardsResponse, BondingInfoResponse,
-    BondingPeriodInfo, ExecuteMsg, MigrateMsg, QueryMsg, ReceiveDelegationMsg,
-    RewardsPowerResponse, StakedResponse, TotalStakedResponse, TotalUnbondingResponse,
+    BondingPeriodInfo, ExecuteMsg, MigrateMsg, QueryMsg, RewardsPowerResponse, StakedResponse,
+    TotalStakedResponse, TotalUnbondingResponse, UnbondAllResponse,
 };
 use crate::state::{
-    Config, Distribution, TokenInfo, TotalStake, ADMIN, CLAIMS, CONFIG, DISTRIBUTION, REWARD_CURVE,
-    STAKE, TOTAL_PER_PERIOD, TOTAL_STAKED,
+    Config, ConverterConfig, Distribution, TokenInfo, TotalStake, ADMIN, CLAIMS, CONFIG,
+    DISTRIBUTION, REWARD_CURVE, STAKE, TOTAL_PER_PERIOD, TOTAL_STAKED, UNBOND_ALL,
 };
 use wynd_curve_utils::Curve;
 
@@ -72,6 +73,9 @@ pub fn instantiate(
             .collect(),
     )?;
 
+    // Initialize unbond all flag.
+    UNBOND_ALL.save(deps.storage, &false)?;
+
     let config = Config {
         instantiator: info.sender,
         cw20_contract: deps.api.addr_validate(&msg.cw20_contract)?,
@@ -80,6 +84,15 @@ pub fn instantiate(
         unbonding_periods: msg.unbonding_periods,
         max_distributions: msg.max_distributions,
         unbonder: addr_opt_validate(deps.api, &msg.unbonder)?,
+        converter: msg
+            .converter
+            .map(|conv| -> StdResult<ConverterConfig> {
+                Ok(ConverterConfig {
+                    contract: deps.api.addr_validate(&conv.contract)?,
+                    pair_to: deps.api.addr_validate(&conv.pair_to)?,
+                })
+            })
+            .transpose()?,
     };
     CONFIG.save(deps.storage, &config)?;
 
@@ -114,8 +127,10 @@ pub fn execute(
             unbonding_period,
         } => execute_unbond(deps, env, info, amount, unbonding_period),
         ExecuteMsg::QuickUnbond { stakers } => execute_quick_unbond(deps, env, info, stakers),
+        ExecuteMsg::UnbondAll {} => execute_unbond_all(deps, info),
+        ExecuteMsg::StopUnbondAll {} => execute_stop_unbond_all(deps, info),
         ExecuteMsg::Claim {} => execute_claim(deps, env, info),
-        ExecuteMsg::Receive(msg) => execute_receive_delegation(deps, env, info, msg),
+        ExecuteMsg::Receive(msg) => execute_receive(deps, env, info, msg),
         ExecuteMsg::DistributeRewards { sender } => {
             execute_distribute_rewards(deps, env, info, sender)
         }
@@ -125,7 +140,13 @@ pub fn execute(
         ExecuteMsg::DelegateWithdrawal { delegated } => {
             execute_delegate_withdrawal(deps, info, delegated)
         }
-        ExecuteMsg::FundDistribution { curve } => execute_fund_distribution(env, deps, info, curve),
+        ExecuteMsg::FundDistribution { funding_info } => {
+            execute_fund_distribution(env, deps, info, funding_info)
+        }
+        ExecuteMsg::MigrateStake {
+            amount,
+            unbonding_period,
+        } => execute_migrate_stake(deps, env, info, amount, unbonding_period),
     }
 }
 
@@ -135,48 +156,111 @@ pub fn execute_fund_distribution(
     env: Env,
     deps: DepsMut,
     info: MessageInfo,
-    schedule: Curve,
+    funding_info: FundingInfo,
 ) -> Result<Response, ContractError> {
+    if UNBOND_ALL.load(deps.storage)? {
+        return Err(ContractError::CannotDistributeIfUnbondAll {
+            what: "funds".into(),
+        });
+    }
+
+    if funding_info.start_time < env.block.time.seconds() {
+        return Err(ContractError::PastStartingTime {});
+    }
+
     let api = deps.api;
     let storage = deps.storage;
 
     for fund in info.funds {
         let asset = AssetInfo::Native(fund.denom);
         let validated_asset = asset.validate(api)?;
-        update_reward_config(
-            &env,
-            storage,
-            validated_asset,
-            fund.amount,
-            schedule.clone(),
-        )?;
+        update_reward_config(storage, validated_asset, fund.amount, funding_info.clone())?;
     }
     Ok(Response::default())
 }
 
+/// Triggers moving the stake from this staking contract to another staking contract
+pub fn execute_migrate_stake(
+    mut deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    amount: Uint128,
+    unbonding_period: u64,
+) -> Result<Response, ContractError> {
+    let cfg = CONFIG.load(deps.storage)?;
+    let converter = cfg
+        .converter
+        .as_ref()
+        .ok_or(ContractError::NoConverter {})?;
+
+    remove_stake_without_total(
+        deps.branch(),
+        &env,
+        &cfg,
+        &info.sender,
+        unbonding_period,
+        amount,
+    )?;
+
+    // update total
+    TOTAL_STAKED.update::<_, StdError>(deps.storage, |token_info| {
+        Ok(TokenInfo {
+            staked: token_info.staked.saturating_sub(amount),
+            unbonding: token_info.unbonding,
+        })
+    })?;
+
+    // directly send the tokens to the converter instead of providing claim
+    Ok(Response::new()
+        // send the tokens to the converter
+        .add_message(WasmMsg::Execute {
+            contract_addr: cfg.cw20_contract.into_string(),
+            msg: to_binary(&Cw20ExecuteMsg::Transfer {
+                recipient: converter.contract.to_string(),
+                amount,
+            })?,
+            funds: vec![],
+        })
+        // once the tokens are transfered to the converter, we convert them
+        .add_message(WasmMsg::Execute {
+            contract_addr: converter.contract.to_string(),
+            msg: to_binary(&ConverterExecuteMsg::Convert {
+                sender: info.sender.to_string(),
+                amount,
+                unbonding_period,
+                pair_contract_from: cfg.instantiator.into_string(),
+                pair_contract_to: converter.pair_to.to_string(),
+            })?,
+            funds: vec![],
+        })
+        .add_attribute("action", "unbond")
+        .add_attribute("amount", amount)
+        .add_attribute("sender", info.sender))
+}
+
 /// Update reward config for the given asset with an additional amount of funding
 fn update_reward_config(
-    env: &Env,
     storage: &mut dyn Storage,
     validated_asset: AssetInfoValidated,
-    amount: Uint128,
-    schedule: Curve,
+    sent_amount: Uint128,
+    FundingInfo {
+        start_time,
+        distribution_duration,
+        amount,
+    }: FundingInfo,
 ) -> Result<(), ContractError> {
     // How can we validate the amount and curve? Monotonic decreasing check is below, given this is there still a need to test the amount?
     let previous_reward_curve = REWARD_CURVE.load(storage, &validated_asset)?;
+
+    let end_time = start_time + distribution_duration;
+    let schedule = Curve::saturating_linear((start_time, amount.u128()), (end_time, 0));
+
     let (min, max) = schedule.range();
     // Validate the the curve locks at most the amount provided and also fully unlocks all rewards sent
-    if min != 0 || max > amount.u128() {
+    if min != 0 || max > sent_amount.u128() {
         return Err(ContractError::InvalidRewards {});
     }
 
-    // Move the curve to the right, so as to not overlap with the past (could mess things up with previous withdrawals).
-    // The idea here is that the person sending the reward can specify how many rewards are locked up until when.
-    // However, every point on the rewards curve represents the rewards locked up at that point in time,
-    // so in order to prevent them from influencing the rewards curve at a point in the past,
-    // we shift it to the right by the current time.
-    // They can then provide a curve starting at `0`, meaning "right now".
-    let schedule = schedule.shift(env.block.time.seconds());
     // combine the two curves
     let new_reward_curve = previous_reward_curve.combine(&schedule);
     new_reward_curve.validate_monotonic_decreasing()?;
@@ -204,7 +288,7 @@ pub fn execute_create_distribution_flow(
     // and we definitely do not want to distribute the staked tokens.
     let config = CONFIG.load(deps.storage)?;
     if let AssetInfoValidated::Token(addr) = &asset {
-        if addr == &config.cw20_contract {
+        if addr == config.cw20_contract {
             return Err(ContractError::InvalidAsset {});
         }
     }
@@ -264,6 +348,10 @@ pub fn execute_rebond(
     bond_from: u64,
     bond_to: u64,
 ) -> Result<Response, ContractError> {
+    if UNBOND_ALL.load(deps.storage)? {
+        return Err(ContractError::CannotRebondIfUnbondAll {});
+    }
+
     // Raise if no amount was provided
     if amount == Uint128::zero() {
         return Err(ContractError::NoRebondAmount {});
@@ -535,7 +623,7 @@ fn update_total_stake(
     Ok(())
 }
 
-pub fn execute_receive_delegation(
+pub fn execute_receive(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
@@ -546,116 +634,107 @@ pub fn execute_receive_delegation(
     // This cannot be fully trusted (the cw20 contract can fake it), so only use it for actions
     // in the address's favor (like paying/bonding tokens, not withdrawls)
 
-    let msg: ReceiveDelegationMsg = from_slice(&wrapper.msg)?;
+    let msg: ReceiveMsg = from_slice(&wrapper.msg)?;
     let api = deps.api;
     match msg {
-        ReceiveDelegationMsg::Delegate {
+        ReceiveMsg::Delegate {
             unbonding_period,
             delegate_as,
-        } => execute_bond(
-            deps,
-            env,
-            info.sender,
-            wrapper.amount,
-            unbonding_period,
-            api.addr_validate(&delegate_as.unwrap_or(wrapper.sender))?,
-        ),
-        ReceiveDelegationMsg::MassDelegate {
-            unbonding_period,
-            delegate_to,
-        } => execute_mass_bond(
-            deps,
-            env,
-            info.sender,
-            wrapper.amount,
+        } => {
+            if UNBOND_ALL.load(deps.storage)? {
+                return Err(ContractError::CannotDelegateIfUnbondAll {});
+            }
+            execute_bond(
+                deps,
+                env,
+                info.sender,
+                wrapper.amount,
+                unbonding_period,
+                api.addr_validate(&delegate_as.unwrap_or(wrapper.sender))?,
+            )
+        }
+        ReceiveMsg::MassDelegate {
             unbonding_period,
             delegate_to,
-        ),
-        ReceiveDelegationMsg::Fund { curve } => {
+        } => {
+            if UNBOND_ALL.load(deps.storage)? {
+                return Err(ContractError::CannotDelegateIfUnbondAll {});
+            }
+            execute_mass_bond(
+                deps,
+                env,
+                info.sender,
+                wrapper.amount,
+                unbonding_period,
+                delegate_to,
+            )
+        }
+        ReceiveMsg::Fund { funding_info } => {
+            if UNBOND_ALL.load(deps.storage)? {
+                return Err(ContractError::CannotDistributeIfUnbondAll {
+                    what: "funds".into(),
+                });
+            }
+            if funding_info.start_time < env.block.time.seconds() {
+                return Err(ContractError::PastStartingTime {});
+            }
             let validated_asset = AssetInfo::Token(info.sender.to_string()).validate(deps.api)?;
-            update_reward_config(&env, deps.storage, validated_asset, wrapper.amount, curve)?;
+            update_reward_config(deps.storage, validated_asset, wrapper.amount, funding_info)?;
             Ok(Response::default())
         }
     }
 }
 
 pub fn execute_unbond(
-    deps: DepsMut,
+    mut deps: DepsMut,
     env: Env,
     info: MessageInfo,
     amount: Uint128,
     unbonding_period: u64,
 ) -> Result<Response, ContractError> {
     let cfg = CONFIG.load(deps.storage)?;
+    // If unbond all flag has been set to true, no unbonding period is required: !true as u64 == 0
+    let unbond_all = UNBOND_ALL.load(deps.storage)?;
 
-    if cfg
-        .unbonding_periods
-        .binary_search(&unbonding_period)
-        .is_err()
-    {
-        return Err(ContractError::NoUnbondingPeriodFound(unbonding_period));
-    }
+    remove_stake_without_total(
+        deps.branch(),
+        &env,
+        &cfg,
+        &info.sender,
+        unbonding_period,
+        amount,
+    )?;
 
-    let distributions: Vec<_> = DISTRIBUTION
-        .range(deps.storage, None, None, Order::Ascending)
-        .collect::<StdResult<Vec<_>>>()?;
-    // calculate rewards power before updating the stake
-    let old_rewards = calc_rewards_powers(deps.storage, &cfg, &info.sender, distributions.iter())?;
-
-    // reduce the sender's stake - aborting if insufficient
-    let mut old_stake = Uint128::zero();
-    let new_stake = STAKE
-        .update(
-            deps.storage,
-            (&info.sender, unbonding_period),
-            |bonding_info| -> StdResult<_> {
-                let mut bonding_info = bonding_info.unwrap_or_default();
-                old_stake = bonding_info.total_stake();
-                bonding_info.release_stake(&env, amount)?;
-                Ok(bonding_info)
-            },
-        )?
-        .total_stake();
-
-    update_total_stake(deps.storage, &cfg, unbonding_period, old_stake, new_stake)?;
-
-    // update the adjustment data for all distributions
-    for ((asset_info, mut distribution), old_reward_power) in
-        distributions.into_iter().zip(old_rewards.into_iter())
-    {
-        let new_reward_power = distribution.calc_rewards_power(deps.storage, &cfg, &info.sender)?;
-        update_rewards(
-            deps.storage,
-            &asset_info,
-            &info.sender,
-            &mut distribution,
-            old_reward_power,
-            new_reward_power,
-        )?;
-
-        // save updated distribution
-        DISTRIBUTION.save(deps.storage, &asset_info, &distribution)?;
-    }
     // update total
     TOTAL_STAKED.update::<_, StdError>(deps.storage, |token_info| {
         Ok(TokenInfo {
             staked: token_info.staked.saturating_sub(amount),
-            unbonding: token_info.unbonding + amount,
+            // If unbond all flag set to true the unbonding period is 0.
+            unbonding: token_info.unbonding + Uint128::new(!unbond_all as u128) * amount,
         })
     })?;
 
-    // provide them a claim
-    CLAIMS.create_claim(
-        deps.storage,
-        &info.sender,
-        amount,
-        Expiration::AtTime(env.block.time.plus_seconds(unbonding_period)),
-    )?;
-
-    Ok(Response::new()
+    let resp = Response::new()
         .add_attribute("action", "unbond")
         .add_attribute("amount", amount)
-        .add_attribute("sender", info.sender))
+        .add_attribute("sender", info.sender.clone());
+
+    // If unbond all flag set to true we don't need to create a claim and send directly. Sending
+    // directly instead of send a Claim submessage resolves in 2 messages instead of 3.
+    if unbond_all {
+        let msg = create_undelegate_msg(info.sender, amount, cfg.cw20_contract)?;
+        Ok(resp.add_submessage(msg))
+    } else {
+        // provide them a claim
+        CLAIMS.create_claim(
+            deps.storage,
+            &info.sender,
+            amount,
+            // If unbond all flag set to true the claim has no delay.
+            Expiration::AtTime(env.block.time.plus_seconds(unbonding_period)),
+        )?;
+        Ok(resp)
+    }
 }
 
 pub fn execute_quick_unbond(
@@ -781,6 +860,48 @@ pub fn execute_quick_unbond(
     Ok(response)
 }
 
+pub fn execute_unbond_all(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
+    let cfg = CONFIG.load(deps.storage)?;
+
+    // Only unbonder can execute unbond all and set state variable to true.
+    ensure_eq!(
+        cfg.unbonder,
+        Some(info.sender),
+        ContractError::Unauthorized {}
+    );
+
+    UNBOND_ALL.update::<_, ContractError>(deps.storage, |unbond_all| {
+        if !unbond_all {
+            Ok(true)
+        } else {
+            Err(ContractError::FlagAlreadySet {})
+        }
+    })?;
+
+    Ok(Response::default().add_attribute("action", "unbond all"))
+}
+
+pub fn execute_stop_unbond_all(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
+    let cfg = CONFIG.load(deps.storage)?;
+
+    if cfg.unbonder != Some(info.sender.clone()) && !ADMIN.is_admin(deps.as_ref(), &info.sender)? {
+        return Err(ContractError::Unauthorized {});
+    }
+
+    UNBOND_ALL.update::<_, ContractError>(deps.storage, |unbond_all| {
+        if unbond_all {
+            Ok(false)
+        } else {
+            Err(ContractError::FlagAlreadySet {})
+        }
+    })?;
+
+    Ok(Response::default().add_attribute("action", "stop unbond all"))
+}
+
 /// Calculates rewards power of the user for all given distributions (for all unbonding periods).
 /// They are returned in the same order as the distributions.
 fn calc_rewards_powers<'a>(
@@ -821,6 +942,67 @@ fn update_rewards(
     Ok(())
 }
 
+/// Removes the stake from the given unbonding period and staker,
+/// updating `DISTRIBUTION`, `TOTAL_PER_PERIOD` and `STAKE`, but *not* `TOTAL_STAKED`.
+fn remove_stake_without_total(
+    deps: DepsMut,
+    env: &Env,
+    cfg: &Config,
+    staker: &Addr,
+    unbonding_period: UnbondingPeriod,
+    amount: Uint128,
+) -> Result<(), ContractError> {
+    if cfg
+        .unbonding_periods
+        .binary_search(&unbonding_period)
+        .is_err()
+    {
+        return Err(ContractError::NoUnbondingPeriodFound(unbonding_period));
+    }
+
+    let distributions: Vec<_> = DISTRIBUTION
+        .range(deps.storage, None, None, Order::Ascending)
+        .collect::<StdResult<Vec<_>>>()?;
+    // calculate rewards power before updating the stake
+    let old_rewards = calc_rewards_powers(deps.storage, cfg, staker, distributions.iter())?;
+
+    // reduce the sender's stake - aborting if insufficient
+    let mut old_stake = Uint128::zero();
+    let new_stake = STAKE
+        .update(
+            deps.storage,
+            (staker, unbonding_period),
+            |bonding_info| -> StdResult<_> {
+                let mut bonding_info = bonding_info.unwrap_or_default();
+                old_stake = bonding_info.total_stake();
+                bonding_info.release_stake(env, amount)?;
+                Ok(bonding_info)
+            },
+        )?
+        .total_stake();
+
+    update_total_stake(deps.storage, cfg, unbonding_period, old_stake, new_stake)?;
+
+    // update the adjustment data for all distributions
+    for ((asset_info, mut distribution), old_reward_power) in
+        distributions.into_iter().zip(old_rewards.into_iter())
+    {
+        let new_reward_power = distribution.calc_rewards_power(deps.storage, cfg, staker)?;
+        update_rewards(
+            deps.storage,
+            &asset_info,
+            staker,
+            &mut distribution,
+            old_reward_power,
+            new_reward_power,
+        )?;
+
+        // save updated distribution
+        DISTRIBUTION.save(deps.storage, &asset_info, &distribution)?;
+    }
+    Ok(())
+}
+
 pub fn execute_claim(
     deps: DepsMut,
     env: Env,
@@ -833,15 +1015,7 @@ pub fn execute_claim(
 
     let config = CONFIG.load(deps.storage)?;
     let amount_str = coin_to_string(release, config.cw20_contract.as_str());
-    let undelegate = Cw20ExecuteMsg::Transfer {
-        recipient: info.sender.to_string(),
-        amount: release,
-    };
-    let undelegate_msg = SubMsg::new(WasmMsg::Execute {
-        contract_addr: config.cw20_contract.to_string(),
-        msg: to_binary(&undelegate)?,
-        funds: vec![],
-    });
+    let undelegate_msg = create_undelegate_msg(info.sender.clone(), release, config.cw20_contract)?;
 
     TOTAL_STAKED.update::<_, StdError>(deps.storage, |token_info| {
         Ok(TokenInfo {
@@ -890,6 +1064,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::WithdrawAdjustmentData { addr, asset } => {
             to_binary(&query_withdraw_adjustment_data(deps, addr, asset)?)
         }
+        QueryMsg::UnbondAll {} => to_binary(&query_unbond_all(deps)?),
     }
 }
 
@@ -1122,6 +1297,12 @@ pub fn query_total_unbonding(deps: Deps) -> StdResult<TotalUnbondingResponse> {
     })
 }
 
+pub fn query_unbond_all(deps: Deps) -> StdResult<UnbondAllResponse> {
+    Ok(UnbondAllResponse {
+        unbond_all: UNBOND_ALL.load(deps.storage)?,
+    })
+}
+
 /// Manages the contract migration.
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, ContractError> {
@@ -1130,7 +1311,19 @@ pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, Co
     // add unbonder to config
     let mut config = CONFIG.load(deps.storage)?;
     config.unbonder = addr_opt_validate(deps.api, &msg.unbonder)?;
+    config.converter = msg
+        .converter
+        .map(|c| {
+            StdResult::Ok(ConverterConfig {
+                contract: deps.api.addr_validate(&c.contract)?,
+                pair_to: deps.api.addr_validate(&c.pair_to)?,
+            })
+        })
+        .transpose()?;
     CONFIG.save(deps.storage, &config)?;
+
+    // set unbond all flag
+    UNBOND_ALL.save(deps.storage, &msg.unbond_all)?;
 
     Ok(Response::new())
 }
@@ -1191,6 +1384,7 @@ mod tests {
             admin: Some(INIT_ADMIN.into()),
             max_distributions: 6,
             unbonder: None,
+            converter: None,
         };
         let info = mock_info("creator", &[]);
         instantiate(deps, env, info, msg).unwrap();
@@ -1212,7 +1406,7 @@ mod tests {
                 let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
                     sender: addr.to_string(),
                     amount: Uint128::new(*stake),
-                    msg: to_binary(&ReceiveDelegationMsg::Delegate {
+                    msg: to_binary(&ReceiveMsg::Delegate {
                         unbonding_period,
                         delegate_as: None,
                     })
@@ -1960,7 +2154,11 @@ mod tests {
                     amount: Uint128::zero(),
                 }],
             ),
-            Curve::saturating_linear((0, 1), (100, 0)),
+            FundingInfo {
+                start_time: mock_env().block.time.seconds(),
+                distribution_duration: mock_env().block.time.seconds() + 10u64,
+                amount: Uint128::new(1),
+            },
         )
         .unwrap_err();
 
@@ -1989,14 +2187,14 @@ mod tests {
         let mut deps = mock_dependencies();
         default_instantiate(deps.as_mut(), mock_env());
 
-        execute_receive_delegation(
+        execute_receive(
             deps.as_mut(),
             mock_env(),
             mock_info(CW20_ADDRESS, &[]),
             Cw20ReceiveMsg {
                 sender: "delegator".to_string(),
                 amount: 100u128.into(),
-                msg: to_binary(&ReceiveDelegationMsg::Delegate {
+                msg: to_binary(&ReceiveMsg::Delegate {
                     unbonding_period: UNBONDING_PERIOD,
                     delegate_as: Some("owner_of_stake".to_string()),
                 })

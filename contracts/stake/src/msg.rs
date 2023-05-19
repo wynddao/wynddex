@@ -2,10 +2,9 @@ use cosmwasm_schema::{cw_serde, QueryResponses};
 use cw20::Cw20ReceiveMsg;
 
 use cosmwasm_std::{Addr, Decimal, Uint128};
-use wynd_curve_utils::Curve;
 use wyndex::asset::{AssetInfo, AssetInfoValidated, AssetValidated};
 
-use wyndex::stake::UnbondingPeriod;
+use wyndex::stake::{ConverterConfig, FundingInfo, UnbondingPeriod};
 
 #[cw_serde]
 pub enum ExecuteMsg {
@@ -31,6 +30,12 @@ pub enum ExecuteMsg {
         /// The addresses of the stakers that should be unbonded
         stakers: Vec<String>,
     },
+    /// UnbondAll is used to allow instant unbond of tokens in emergency cases.
+    /// Can only be called by the `unbonder` account.
+    UnbondAll {},
+    /// Allows to revert the unbond all flag to false.
+    /// Can only be called by the `unbonder` account or the ADMIN.
+    StopUnbondAll {},
     /// Claim is used to claim your native tokens that you previously "unbonded"
     /// after the contract-defined waiting period (eg. 1 week)
     Claim {},
@@ -79,32 +84,15 @@ pub enum ExecuteMsg {
         delegated: String,
     },
     /// Fund a distribution flow with 1 or more native tokens, updating each provided native token's reward config appropriately.
-    /// The x-values of the given curve are interpreted as seconds from now (so you probably want to start with `0`) and
-    /// the y-values as locked rewards that should not be distributed at that point in time.
     /// Funds to be provided are included in `info.funds`
-    FundDistribution { curve: Curve },
-}
+    FundDistribution { funding_info: FundingInfo },
 
-#[cw_serde]
-pub enum ReceiveDelegationMsg {
-    Delegate {
-        /// Unbonding period in seconds
+    /// Moves the given amount of LP tokens staked to the given unbonding period from the sender's
+    /// account to a different pool (by converting one or more of the pool tokens).
+    MigrateStake {
+        amount: Uint128,
         unbonding_period: u64,
-        /// If set, the staked assets will be assigned to the given address instead of the sender
-        delegate_as: Option<String>,
     },
-    /// This will delegate a large sum on behalf of many different users.
-    /// The total amount in delegate_to must be <= the amount of tokens sent.
-    /// If it is less, any remainder is staked on behalf of the sender
-    MassDelegate {
-        /// Unbonding period in seconds
-        unbonding_period: u64,
-        delegate_to: Vec<(String, Uint128)>,
-    },
-    /// Fund a distribution flow with cw20 tokens and update the Reward Config for that cw20 asset.
-    /// The x-values of the given curve are interpreted as seconds from now (so you probably want to start with `0`) and
-    /// the y-values as locked rewards that should not be distributed at that point in time.
-    Fund { curve: Curve },
 }
 
 #[cw_serde]
@@ -165,12 +153,20 @@ pub enum QueryMsg {
     /// Returns withdraw adjustment data
     #[returns(WithdrawAdjustmentDataResponse)]
     WithdrawAdjustmentData { addr: String, asset: AssetInfo },
+    /// Returns the value of unbond all flag
+    #[returns(UnbondAllResponse)]
+    UnbondAll {},
 }
 
 #[cw_serde]
 pub struct MigrateMsg {
-    /// Address of the account that can call [`ExecuteMsg::QuickUnbond`]
+    /// Address of the account that can call [`ExecuteMsg::QuickUnbond`], [`ExecuteMsg::UnbondAll`]
+    /// and [`ExecuteMsg::StopUnbondAll`]
     pub unbonder: Option<String>,
+    /// Allows adding a converter to the staking contract after instantiation.
+    pub converter: Option<ConverterConfig>,
+    /// Allows to directly set unbond all flag during migrations.
+    pub unbond_all: bool,
 }
 
 #[cw_serde]
@@ -259,3 +255,9 @@ pub struct DistributionDataResponse {
     pub distributions: Vec<(AssetInfoValidated, crate::state::Distribution)>,
 }
 pub type WithdrawAdjustmentDataResponse = crate::state::WithdrawAdjustment;
+
+#[cw_serde]
+pub struct UnbondAllResponse {
+    /// Value of unbond all flag.
+    pub unbond_all: bool,
+}
