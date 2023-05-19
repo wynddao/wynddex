@@ -24,6 +24,7 @@ jobs:
             artifacts/cw_placeholder.wasm
             artifacts/cw_splitter.wasm
             artifacts/gauge_adapter.wasm
+            artifacts/lp_converter.wasm
             artifacts/nominated_trader.wasm
             artifacts/wyndex_multi_hop.wasm
             artifacts/wyndex_stake.wasm

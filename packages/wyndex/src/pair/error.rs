@@ -8,6 +8,9 @@ pub enum ContractError {
     #[error("{0}")]
     Std(#[from] StdError),
 
+    #[error("{0}")]
+    Decimal(#[from] cosmwasm_std::DecimalRangeExceeded),
+
     #[error("Unknown reply id '{0}'")]
     UnknownReply(u64),
 

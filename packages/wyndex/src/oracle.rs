@@ -1,351 +1,573 @@
-use std::collections::HashMap;
+use cosmwasm_schema::cw_serde;
 
-use cosmwasm_schema::{
-    cw_serde,
-    serde::{de::DeserializeOwned, Serialize},
+use cosmwasm_std::{
+    Decimal, Decimal256, Env, Fraction, StdError, StdResult, Storage, Timestamp, Uint128, Uint256,
 };
-use cosmwasm_std::{Deps, Env, Order, StdResult, Storage, Uint128};
-use cw_storage_plus::{Bound, Item, Map};
+use cw_storage_plus::Item;
 
-use crate::{
-    asset::AssetInfoValidated,
-    pair::{ContractError, HistoricalPricesResponse, HistoryDuration},
-};
+use crate::asset::{AssetInfo, AssetInfoValidated};
 
-const MINUTE: u64 = 60;
-const HALF_HOUR: u64 = 30 * MINUTE;
-const TWELVE_HOURS: u64 = 60 * MINUTE;
+pub const MINUTE: u64 = 60;
+pub const HALF_HOUR: u64 = 30 * MINUTE;
+pub const SIX_HOURS: u64 = 6 * 60 * MINUTE;
 
-/// For each price history, stores the last timestamp (in seconds) when it was updated
 #[cw_serde]
-#[derive(Default)]
-struct LastUpdates {
+#[derive(Copy)]
+pub enum SamplePeriod {
+    Minute,
+    HalfHour,
+    SixHour,
+}
+
+const LAST_UPDATES: Item<LastUpdates> = Item::new("oracle_last_updated");
+const LAST_MINUTES_PRICES: Item<Prices> = Item::new("oracle_by_minute");
+const LAST_HALF_HOUR_PRICES: Item<Prices> = Item::new("oracle_by_half_hour");
+const LAST_SIX_HOUR_PRICES: Item<Prices> = Item::new("oracle_by_six_hour");
+
+/// For each price history, stores the last timestamp (in seconds) when it was updated,
+/// As well as the last measurement (running accumulator).
+/// Snapshot times are measured in full seconds
+#[cw_serde]
+pub struct LastUpdates {
+    pub accumulator: Accumulator,
     pub minutes: u64,
     pub half_hours: u64,
-    pub twelve_hours: u64,
+    pub six_hours: u64,
 }
 
-const LAST_UPDATED: Item<LastUpdates> = Item::new("oracle_last_updated");
-const LAST_15MINUTES_PRICES: TimeBuffer<Vec<Uint128>, MINUTE, 15> =
-    TimeBuffer::new("oracle_last_15minutes", "oracle_last_15minutes_first");
-const LAST_DAY_PRICES: TimeBuffer<Vec<Uint128>, HALF_HOUR, 48> =
-    TimeBuffer::new("oracle_last_day", "oracle_last_day_first");
-const LAST_WEEK_PRICES: TimeBuffer<Vec<Uint128>, TWELVE_HOURS, 14> =
-    TimeBuffer::new("oracle_last_week", "oracle_last_week_first");
-
-pub struct PricePoint {
-    /// the asset that is being swapped from
-    pub from: AssetInfoValidated, // TODO: borrow to avoid clone?
-    /// the asset that is being swapped to
-    pub to: AssetInfoValidated,
-    /// the price of the swap
-    pub price: Uint128,
+/// This is the last snapshot of the price accumulator.
+/// This only works on 2 pools:
+///   A is config.pair_info.asset_infos[0],
+///   B is config.pair_info.asset_infos[1],
+/// We keep this pattern and limit how much data is written
+#[cw_serde]
+pub struct Accumulator {
+    /// Last time we measured the accumulator.
+    /// Uses nanosecond for subsecond-blocks (eg sei)
+    pub snapshot: Timestamp,
+    /// Value of a_per_b at that time
+    pub last_price: Decimal,
+    /// Running accumulator values
+    pub twap_a_per_b: Twap,
+    pub twap_b_per_a: Twap,
+    // FIXME: add this later (https://github.com/wynddao/wyndex-priv/issues/7)
+    // pub geometric_a_to_b: Twgm,
 }
 
-impl PricePoint {
-    pub fn new(from: AssetInfoValidated, to: AssetInfoValidated, price: Uint128) -> Self {
-        Self { from, to, price }
+impl Accumulator {
+    pub fn new(now: Timestamp, price: Decimal) -> Self {
+        Accumulator {
+            snapshot: now,
+            last_price: price,
+            twap_a_per_b: Default::default(),
+            twap_b_per_a: Default::default(),
+        }
+    }
+
+    /// if env.block.time > self.snapshot, does whole update of twap
+    /// if equal, then just updates last_price
+    /// if earlier, panics (should never happen)
+    pub fn update(&mut self, env: &Env, price: Decimal) {
+        use std::cmp::Ordering::*;
+        let now = env.block.time;
+        match now.cmp(&self.snapshot) {
+            Less => {
+                panic!("Cannot update from the past");
+            }
+            Equal => {
+                // just update the last price
+                self.last_price = price;
+            }
+            Greater => {
+                // we do proper update
+                let elapsed = diff_nanos(self.snapshot, now);
+                self.twap_a_per_b = self.twap_a_per_b.accumulate_nanos(self.last_price, elapsed);
+                // Note: price must never be 0
+                self.twap_b_per_a = self
+                    .twap_b_per_a
+                    .accumulate_nanos(self.last_price.inv().unwrap(), elapsed);
+                self.last_price = price;
+                self.snapshot = now;
+            }
+        }
     }
 }
 
-/// Stores the price of the asset for TWAP calculations and
-pub fn store_price(
-    storage: &mut dyn Storage,
-    env: &Env,
-    asset_infos: &[AssetInfoValidated],
-    mut prices: Vec<PricePoint>,
-) -> Result<(), ContractError> {
-    let mut last_updated = LAST_UPDATED.may_load(storage)?.unwrap_or_default();
-    if env.block.time.seconds() == last_updated.minutes {
-        // if the block time is exactly the minute timestamp, we already updated within this block,
-        // no need to update
-        return Ok(());
+pub const BUFFER_DEPTH: usize = 32;
+
+/// This is a buffer of at most [`BUFFER_DEPTH`] size, containing snapshots of the accumulator.
+/// Accumulator values are stored newest to oldest. Index 0 is the value as of LastUpdates.<period>
+/// Every value after that is the (interpolated) value one <period> after that
+/// (eg for the HALF_HOUR range, 3 index steps means 90 minutes)
+/// The buffer starts out empty, and is filled in as we go, but always has at most [`BUFFER_DEPTH`] values.
+#[cw_serde]
+#[derive(Default)]
+pub struct Prices {
+    pub twap_a_per_b: Vec<Twap>,
+    pub twap_b_per_a: Vec<Twap>,
+    // FIXME: add this later (https://github.com/wynddao/wyndex-priv/issues/7)
+    // pub geometric_a_to_b: [Twgm; BUFFER_DEPTH],
+}
+
+impl Prices {
+    /// update the whole price buffer, given latest accumulator, last sample time, and current time
+    pub fn accumulate(
+        &self,
+        last_update: u64,
+        latest_checkpoint: u64,
+        acc: &Accumulator,
+        step: u64,
+    ) -> Prices {
+        let new_checkpoints = ((latest_checkpoint - last_update) / step) as usize;
+
+        let mut new_prices = Prices::default();
+
+        if new_prices.twap_a_per_b.len() < BUFFER_DEPTH {
+            // we have not fully filled the buffer yet, so we extend the size first
+            // both vectors are the same size, so we only need to calculate this for one of them
+            let len = BUFFER_DEPTH.min(self.twap_a_per_b.len() + new_checkpoints);
+            new_prices.twap_a_per_b.resize(len, Default::default());
+            new_prices.twap_b_per_a.resize(len, Default::default());
+        }
+
+        // we copy any still valid ones to their new offset
+        // and figure out where we start computing from
+        let (last_copied, last_timestamp) = if new_checkpoints < BUFFER_DEPTH {
+            let len = new_prices.twap_a_per_b.len();
+            new_prices.twap_a_per_b[new_checkpoints..]
+                .copy_from_slice(&self.twap_a_per_b[0..len - new_checkpoints]);
+            new_prices.twap_b_per_a[new_checkpoints..]
+                .copy_from_slice(&self.twap_b_per_a[0..len - new_checkpoints]);
+            (new_checkpoints, last_update)
+        } else {
+            // all are invalid, need to figure out the time that would be at the first one
+            let oldest_time = latest_checkpoint - step * ((BUFFER_DEPTH) as u64);
+            (BUFFER_DEPTH, oldest_time)
+        };
+
+        // * last_timestamp from accumulator
+        // * value at that timestamp
+        // * last_price from accumulator
+        // * time at first index we will be writing to
+
+        for i in 0..last_copied {
+            // how much time passed between the accumulator and this checkpoint
+            let time = Timestamp::from_seconds(last_timestamp + (last_copied - i) as u64 * step);
+            let elapsed_nanos = diff_nanos(acc.snapshot, time);
+            // set the new values
+            new_prices.twap_a_per_b[i] = acc
+                .twap_a_per_b
+                .accumulate_nanos(acc.last_price, elapsed_nanos);
+            new_prices.twap_b_per_a[i] = acc
+                .twap_b_per_a
+                .accumulate_nanos(acc.last_price.inv().unwrap(), elapsed_nanos);
+        }
+
+        new_prices
+    }
+}
+
+/// We need more precision than Uint128, but will overflow with Decimal
+#[cw_serde]
+#[derive(Default, Copy, Eq, PartialOrd, Ord)]
+pub struct Twap(Decimal256);
+
+impl Twap {
+    /// Give it the time since the last measurement and the value at last snapshot.
+    /// It will add (last_price * elapsed_seconds) to the accumulator.
+    /// Make sure to be careful with overflow
+    #[must_use]
+    pub fn accumulate_nanos(&self, last_price: Decimal, elapsed_nanos: u64) -> Twap {
+        let numerator = Uint256::from(last_price.numerator()) * Uint256::from(elapsed_nanos);
+        // 10^18 from Decimal, 10^9 from nanos
+        let increment =
+            Decimal256::from_atomics(numerator, Decimal256::DECIMAL_PLACES + 9).unwrap();
+        Twap(self.0 + increment)
     }
 
-    // get the correct order of the price entries
-    let asset_info_index = cartesian_product(asset_infos)
-        .map(|(a, b)| (a, b))
-        .enumerate()
-        .map(|(i, a)| (a, i))
-        .collect::<HashMap<_, _>>();
-    prices.sort_by(|a, b| {
-        asset_info_index[&(&a.from, &a.to)].cmp(&asset_info_index[&(&b.from, &b.to)])
-    });
-    let prices: Vec<_> = prices.into_iter().map(|p| p.price).collect();
-
-    let mut updated = false;
-
-    if last_updated.minutes + MINUTE <= env.block.time.seconds() {
-        // update every minute
-        LAST_15MINUTES_PRICES.save(storage, env.block.time.seconds(), prices.clone())?;
-        last_updated.minutes = env.block.time.seconds();
-        updated = true;
+    #[must_use]
+    pub fn accumulate_secs(&self, last_price: Decimal, elapsed_secs: u64) -> Twap {
+        let numerator = Uint256::from(last_price.numerator()) * Uint256::from(elapsed_secs);
+        let increment = Decimal256::from_atomics(numerator, Decimal256::DECIMAL_PLACES).unwrap();
+        Twap(self.0 + increment)
     }
 
-    if last_updated.half_hours + HALF_HOUR <= env.block.time.seconds() {
-        // update every half hour
-        LAST_DAY_PRICES.save(storage, env.block.time.seconds(), prices.clone())?;
-        last_updated.half_hours = env.block.time.seconds();
-        updated = true;
+    /// Given two Twap values and the time between them, get the average price in this range
+    /// (now - earlier) * 10^9 / elapsed_nanos
+    pub fn average_price(&self, earlier: &Twap, elapsed_nanos: u64) -> Decimal {
+        let diff = self.0 - earlier.0;
+        let atomics = diff.numerator() / Uint256::from(elapsed_nanos);
+        Decimal::from_atomics(
+            Uint128::try_from(atomics).unwrap(),
+            Decimal256::DECIMAL_PLACES - 9,
+        )
+        .unwrap()
     }
+}
 
-    if last_updated.twelve_hours + TWELVE_HOURS <= env.block.time.seconds() {
-        // update every 12 hours
-        LAST_WEEK_PRICES.save(storage, env.block.time.seconds(), prices)?;
-        last_updated.twelve_hours = env.block.time.seconds();
-        updated = true;
-    }
+/// get the elapsed nanos from older to later
+pub fn diff_nanos(older: Timestamp, later: Timestamp) -> u64 {
+    later.nanos() - older.nanos()
+}
 
-    if updated {
-        LAST_UPDATED.save(storage, &last_updated)?;
-    }
+/// This must be called one time when the initial liquidity is added to initialize all the twap counters.
+/// It gets the timestamp of the block along with the initial price, and sets up all accumulators
+pub fn initialize_oracle(storage: &mut dyn Storage, env: &Env, price: Decimal) -> StdResult<()> {
+    let now = env.block.time;
+
+    // save the current value
+    let accumulator = Accumulator::new(now, price);
+    let last_updates = LastUpdates {
+        accumulator,
+        minutes: now.seconds(),
+        half_hours: now.seconds(),
+        six_hours: now.seconds(),
+    };
+    LAST_UPDATES.save(storage, &last_updates)?;
+
+    // set empty prices (0 for all accumulators)
+    let empty_prices = Prices::default();
+    LAST_MINUTES_PRICES.save(storage, &empty_prices)?;
+    LAST_HALF_HOUR_PRICES.save(storage, &empty_prices)?;
+    LAST_SIX_HOUR_PRICES.save(storage, &empty_prices)?;
+
     Ok(())
 }
 
-pub fn query_historical(
-    deps: Deps,
+/// This is called every time the price changes in the pool.
+/// If this is the same timestamp as the last update (same block), we just update last_price
+/// If it is later timestamp, we update the accumulator, and possibly update historical values
+pub fn store_oracle_price(
+    storage: &mut dyn Storage,
     env: &Env,
-    asset_infos: Vec<AssetInfoValidated>,
-    duration: HistoryDuration,
-) -> StdResult<HistoricalPricesResponse> {
-    match duration {
-        HistoryDuration::FifteenMinutes => {
-            query_timebuffer(deps, env, &LAST_15MINUTES_PRICES, asset_infos)
-        }
-        HistoryDuration::Day => query_timebuffer(deps, env, &LAST_DAY_PRICES, asset_infos),
-        HistoryDuration::Week => query_timebuffer(deps, env, &LAST_WEEK_PRICES, asset_infos),
-    }
-}
-
-/// Returns the last day of price history for each asset combination.
-/// Make sure the `asset_infos` are ordered correctly.
-fn query_timebuffer<const STEP: u64, const CAP: u64>(
-    deps: Deps,
-    env: &Env,
-    buffer: &TimeBuffer<Vec<Uint128>, STEP, CAP>,
-    asset_infos: Vec<AssetInfoValidated>,
-) -> StdResult<HistoricalPricesResponse> {
-    // buffer.all returns a vec with all prices for each timestamp,
-    // but we want to return one vec with all prices *per asset combination*
-    let combinations = combinations(&asset_infos);
-
-    let mut cumulative_prices: Vec<_> = combinations
-        .into_iter()
-        .map(|(from, to)| (from, to, vec![]))
-        .collect();
-
-    for result in buffer.all(deps.storage, env)? {
-        let (timestamp, prices) = result?;
-        for i in 0..cumulative_prices.len() {
-            cumulative_prices[i].2.push((timestamp, prices[i]));
-        }
+    new_price_a_per_b: Decimal,
+) -> StdResult<()> {
+    let mut updates = LAST_UPDATES.load(storage)?;
+    // if the block time is exactly the minute timestamp, we already updated within this block, just track last_price
+    if env.block.time == updates.accumulator.snapshot {
+        updates.accumulator.last_price = new_price_a_per_b;
+        LAST_UPDATES.save(storage, &updates)?;
+        return Ok(());
     }
 
-    Ok(HistoricalPricesResponse {
-        historical_prices: cumulative_prices,
-    })
-}
-
-fn combinations(
-    asset_infos: &[AssetInfoValidated],
-) -> Vec<(AssetInfoValidated, AssetInfoValidated)> {
-    let mut combinations =
-        Vec::with_capacity(asset_infos.len() * asset_infos.len() - asset_infos.len());
-    for from in asset_infos {
-        for to in asset_infos {
-            if from != to {
-                combinations.push((from.clone(), to.clone()));
-            }
-        }
+    // update if full minute has passed since last time
+    if let Some(latest_checkpoint) = calc_checkpoint(updates.minutes, env, MINUTE) {
+        let old_prices = LAST_MINUTES_PRICES.load(storage)?;
+        let prices = old_prices.accumulate(
+            updates.minutes,
+            latest_checkpoint,
+            &updates.accumulator,
+            MINUTE,
+        );
+        updates.minutes = latest_checkpoint;
+        LAST_MINUTES_PRICES.save(storage, &prices)?;
     }
-    combinations
+
+    // update if full half hour has passed since last time
+    if let Some(latest_checkpoint) = calc_checkpoint(updates.half_hours, env, HALF_HOUR) {
+        let old_prices = LAST_HALF_HOUR_PRICES.load(storage)?;
+        let prices = old_prices.accumulate(
+            updates.half_hours,
+            latest_checkpoint,
+            &updates.accumulator,
+            HALF_HOUR,
+        );
+        updates.half_hours = latest_checkpoint;
+        LAST_HALF_HOUR_PRICES.save(storage, &prices)?;
+    }
+
+    // update if full six hour has passed since last time
+    if let Some(latest_checkpoint) = calc_checkpoint(updates.six_hours, env, SIX_HOURS) {
+        let old_prices = LAST_SIX_HOUR_PRICES.load(storage)?;
+        let prices = old_prices.accumulate(
+            updates.six_hours,
+            latest_checkpoint,
+            &updates.accumulator,
+            SIX_HOURS,
+        );
+        updates.six_hours = latest_checkpoint;
+        LAST_SIX_HOUR_PRICES.save(storage, &prices)?;
+    }
+
+    // always update the current accumulator (after calculations are finished to not interfere)
+    updates.accumulator.update(env, new_price_a_per_b);
+    LAST_UPDATES.save(storage, &updates)
 }
 
-fn cartesian_product(
-    asset_infos: &[AssetInfoValidated],
-) -> impl Iterator<Item = (&AssetInfoValidated, &AssetInfoValidated)> {
-    asset_infos.iter().flat_map(move |from| {
-        asset_infos
-            .iter()
-            .filter(|to| !from.equal(to))
-            .map(move |to| (from, to))
-    })
-}
-
-/// A ringbuffer, intended for using timestamps as indices.
-///
-/// # Layout
-/// The buffer is stored in a `Map` with an index (derived from the timestamp) as key and both timestamp and `T` as value.
-/// It also contains a metadata item that stores the index of the first element and its timestamp.
-/// The map does not give a lot of guarantees, except that all valid entries are ordered by their timestamp.
-/// There are, however, possibly invalid entries stored. These are entries that are older than the start time.
-/// These are not removed, but filtered out when loading the buffer.
-struct TimeBuffer<'a, T: Serialize + DeserializeOwned, const STEP: u64, const CAP: u64> {
-    /// The actual data. The value contains both the timestamp and the value.
-    data: Map<'a, u64, (u64, T)>,
-    /// The start index. This is subtracted from all indices to get the actual index.
-    /// It will cycle through the `data` index space.
-    start_idx: Item<'a, StartData>,
+/// This finds the most recent checkpoint before the current moment.
+/// Returns None if there is nothing more recent than the latest update.
+fn calc_checkpoint(last_update: u64, env: &Env, step: u64) -> Option<u64> {
+    let steps = (env.block.time.seconds() - last_update) / step;
+    if steps == 0 {
+        None
+    } else {
+        Some(last_update + steps * step)
+    }
 }
 
 #[cw_serde]
-struct StartData {
-    /// The index inside the map that corresponds to the start time.
-    index: u64,
-    /// The timestamp when the buffer starts. All indices are calculated relative to this.
-    time: u64,
+pub struct TwapResponse {
+    pub a: AssetInfo,
+    pub b: AssetInfo,
+    pub a_per_b: Decimal,
+    pub b_per_a: Decimal,
 }
 
-impl<'a, T: Serialize + DeserializeOwned + std::fmt::Debug, const STEP: u64, const CAP: u64>
-    TimeBuffer<'a, T, STEP, CAP>
-{
-    pub const fn new(name: &'a str, start_idx: &'a str) -> Self {
-        Self {
-            data: Map::new(name),
-            start_idx: Item::new(start_idx),
-        }
-    }
+/// This gets the twap for a range, which must be one of our sample frequencies, within the depth we maintain
+pub fn query_oracle_range(
+    storage: &dyn Storage,
+    env: &Env,
+    asset_infos: &[AssetInfoValidated],
+    // This is the resolution of the buffer we wish to read
+    sample_period: SamplePeriod,
+    // This is the beginning of the period, measured in how many full samples back we start
+    // 4 would start 4 full sample periods earlier than the end of the time buffer
+    start_index: u32,
+    // This is the end of the period, measured in how many full samples back we end.
+    // Some(0) takes the last item on the stored buffer.
+    // None takes the latest accumulator update
+    end_index: Option<u32>,
+) -> StdResult<TwapResponse> {
+    // TODO: assert start_index > end_index
 
-    /// Save the given timestamp and value to the buffer.
-    /// Note: Make sure to only save timestamps in increasing order
-    /// (or more specifically: Do not store a value chronologically before the oldest entry).
-    pub fn save(&self, storage: &mut dyn Storage, timestamp: u64, value: T) -> StdResult<()> {
-        // get start index, defaulting to the given timestamp if not set
-        let mut save_start = false;
-        let mut start = match self.start_idx.may_load(storage)? {
-            Some(start) => start,
-            None => {
-                let start = StartData {
-                    index: 0,
-                    time: timestamp,
-                };
-                save_start = true;
-                start
-            }
-        };
+    let updates = LAST_UPDATES.load(storage)?;
+    let (step, last_update, stored_prices) = match sample_period {
+        SamplePeriod::Minute => (MINUTE, updates.minutes, LAST_MINUTES_PRICES.load(storage)?),
+        SamplePeriod::HalfHour => (
+            HALF_HOUR,
+            updates.half_hours,
+            LAST_HALF_HOUR_PRICES.load(storage)?,
+        ),
+        SamplePeriod::SixHour => (
+            SIX_HOURS,
+            updates.six_hours,
+            LAST_SIX_HOUR_PRICES.load(storage)?,
+        ),
+    };
 
-        if timestamp < start.time {
-            panic!(
-                "Only limited timetravel is supported. Cannot store data before the first entry."
-            );
-        }
+    // interpolate prices to the present (if they haven't been updated in a while)
+    let latest_checkpoint = calc_checkpoint(last_update, env, step);
+    let (_checkpoint, prices) = match latest_checkpoint {
+        Some(checkpoint) => (
+            checkpoint,
+            stored_prices.accumulate(last_update, checkpoint, &updates.accumulator, step),
+        ),
+        None => (last_update, stored_prices),
+    };
 
-        // calculate the index inside the buffer
-        let actual_idx = (timestamp - start.time) / STEP + start.index;
-        if timestamp >= start.time + STEP * CAP {
-            // we skipped over the start index, so we need to move the start index behind the latest entry
-            start.index = (actual_idx + 1) % CAP;
-            // also update the timestamp of the start index
-            // it should be CAP steps behind the latest entry
-            start.time += (actual_idx + 1 - CAP) * STEP;
-            save_start = true;
-        }
-        if save_start {
-            self.start_idx.save(storage, &start)?;
-        }
-        // wrap index to the buffer capacity
-        let actual_idx = actual_idx % CAP;
+    let old_twap_a_per_b = prices
+        .twap_a_per_b
+        .get(start_index as usize)
+        .ok_or_else(|| {
+            StdError::generic_err("start index is earlier than earliest recorded price data")
+        })?;
+    let old_twap_b_per_a = prices.twap_b_per_a[start_index as usize];
 
-        self.data.save(storage, actual_idx, &(timestamp, value))?;
-        Ok(())
-    }
+    // handle current accumulator (`end_index == None`)
+    let (elapsed_nanos, new_twap_a_per_b, new_twap_b_per_a) = match end_index {
+        Some(end_index) => {
+            let elapsed_nanos = step * 1_000_000_000u64 * (start_index - end_index) as u64;
 
-    pub fn all<'b>(
-        &self,
-        storage: &'a dyn Storage,
-        env: &Env,
-    ) -> StdResult<impl Iterator<Item = StdResult<(u64, T)>> + 'b>
-    where
-        T: 'b,
-        'a: 'b,
-    {
-        let start_data = self.start_idx.may_load(storage)?.unwrap_or(StartData {
-            index: 0,
-            time: env.block.time.seconds(),
-        });
-
-        Ok(self
-            .data
-            // range from start index to end of `data`
-            .range(
-                storage,
-                Some(Bound::inclusive(start_data.index)),
-                None,
-                Order::Ascending,
+            (
+                elapsed_nanos,
+                prices.twap_a_per_b[end_index as usize],
+                prices.twap_b_per_a[end_index as usize],
             )
-            // then from start of `data` to start index
-            .chain(self.data.range(
-                storage,
-                None,
-                Some(Bound::exclusive(start_data.index)),
-                Order::Ascending,
-            ))
-            .filter(move |res| Self::is_valid(start_data.time, res))
-            .map(|res| res.map(|(_, (timestamp, value))| (timestamp, value))))
-    }
-
-    fn is_valid(start_time: u64, res: &StdResult<(u64, (u64, T))>) -> bool {
-        // keep only errors and valid entries
-        match res {
-            Ok((_, (time, _))) => *time >= start_time,
-            Err(_) => true,
         }
-    }
+        None => {
+            // in this case, we calculate time between start entry and the last buffer entry and add the time since the last update
+            let elapsed_nanos = step * 1_000_000_000u64 * start_index as u64
+                + env.block.time.nanos()
+                - last_update * 1_000_000_000u64;
+
+            let elapsed_since_acc = env.block.time.nanos() - updates.accumulator.snapshot.nanos();
+            (
+                elapsed_nanos,
+                updates
+                    .accumulator
+                    .twap_a_per_b
+                    .accumulate_nanos(updates.accumulator.last_price, elapsed_since_acc),
+                updates.accumulator.twap_b_per_a.accumulate_nanos(
+                    updates.accumulator.last_price.inv().unwrap(),
+                    elapsed_since_acc,
+                ),
+            )
+        }
+    };
+
+    let a_per_b = new_twap_a_per_b.average_price(old_twap_a_per_b, elapsed_nanos);
+    let b_per_a = new_twap_b_per_a.average_price(&old_twap_b_per_a, elapsed_nanos);
+
+    Ok(TwapResponse {
+        a: asset_infos[0].clone().into(),
+        b: asset_infos[1].clone().into(),
+        a_per_b,
+        b_per_a,
+    })
+}
+
+/// This gets the twap for a range, which must be one of our sample frequencies, within the depth we maintain
+pub fn query_oracle_accumulator(storage: &dyn Storage) -> StdResult<Accumulator> {
+    Ok(LAST_UPDATES.load(storage)?.accumulator)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use cosmwasm_std::testing::{mock_env, MockStorage};
+    use crate::oracle::{Accumulator, Twap, BUFFER_DEPTH};
+    use cosmwasm_std::testing::mock_env;
+    use cosmwasm_std::{assert_approx_eq, Decimal, Fraction, Timestamp, Uint128};
+
+    use super::{calc_checkpoint, Prices, MINUTE};
 
     #[test]
-    fn timebuffer() {
-        let mut storage = MockStorage::default();
-        let env = mock_env();
+    fn twap_accumulates() {
+        // Test 10 s at 3, 10s at 2, 10s at 1... see average
+        let orig = Twap::default();
+        let first = orig.accumulate_nanos(Decimal::percent(300), 10_000_000_000);
+        let second = first.accumulate_nanos(Decimal::percent(200), 10_000_000_000);
+        let third = second.accumulate_nanos(Decimal::percent(100), 10_000_000_000);
 
-        // buffer that holds 10 entries, with a 1 second step in between
-        let buffer = TimeBuffer::<u64, 1, 10>::new("test", "test_start");
+        // find averages over all time
+        let total_avg = third.average_price(&orig, 30_000_000_000);
+        assert_eq!(total_avg, Decimal::percent(200));
 
-        // empty buffer
-        let entries = buffer
-            .all(&storage, &env)
-            .unwrap()
-            .collect::<StdResult<Vec<_>>>()
-            .unwrap();
-        assert_eq!(entries, vec![]);
+        // this has 10s at 2, 10s at 1
+        let partial_avg = third.average_price(&first, 20_000_000_000);
+        assert_eq!(partial_avg, Decimal::percent(150));
+    }
 
-        let now = env.block.time.seconds();
+    #[test]
+    fn updating_accumulator() {
+        let step = 15u64;
+        let time = Timestamp::from_seconds(1682155831);
 
-        buffer.save(&mut storage, now, 1).unwrap();
-        buffer.save(&mut storage, now + 1, 2).unwrap();
-        // leave `now + 2` empty
-        buffer.save(&mut storage, now + 3, 4).unwrap();
+        // this is history that will be ignored
+        let mut acc = Accumulator::new(time, Decimal::percent(1700));
 
-        let entries = buffer
-            .all(&storage, &env)
-            .unwrap()
-            .collect::<StdResult<Vec<_>>>()
-            .unwrap();
-        assert_eq!(entries, vec![(now, 1), (now + 1, 2), (now + 3, 4)]);
+        // for the start of our counting era, the price is 3
+        let mut env = mock_env();
+        let time = time.plus_seconds(500);
+        env.block.time = time;
+        acc.update(&env, Decimal::percent(300));
+        let orig = acc.clone();
 
-        // wrap around, overwriting `now`
-        buffer.save(&mut storage, now + 10, 5).unwrap();
+        // after one "step", drops down to 1.00
+        env.block.time = time.plus_seconds(step);
+        acc.update(&env, Decimal::percent(100));
 
-        let entries = buffer
-            .all(&storage, &env)
-            .unwrap()
-            .collect::<StdResult<Vec<_>>>()
-            .unwrap();
-        assert_eq!(entries, vec![(now + 1, 2), (now + 3, 4), (now + 10, 5)]);
+        // after another step, comes up to 2.00
+        env.block.time = time.plus_seconds(step * 2);
+        acc.update(&env, Decimal::percent(200));
 
-        // wrap around multiple times, overwriting all other entries
-        buffer.save(&mut storage, now + 35, 6).unwrap();
+        // after another step moves to 5 (doesn't matter as this time is not included)
+        env.block.time = time.plus_seconds(step * 3);
+        acc.update(&env, Decimal::percent(500));
 
-        let entries = buffer
-            .all(&storage, &env)
-            .unwrap()
-            .collect::<StdResult<Vec<_>>>()
-            .unwrap();
-        assert_eq!(entries, vec![(now + 35, 6)]);
+        // ensure other attributes set
+        assert_eq!(acc.last_price, Decimal::percent(500));
+        assert_eq!(acc.snapshot, env.block.time);
+
+        // average a_per_b price should be (3 + 1 + 2) / 3 = 2
+        let a_per_b = acc
+            .twap_a_per_b
+            .average_price(&orig.twap_a_per_b, step * 3 * 1_000_000_000);
+        assert_eq!(a_per_b, Decimal::percent(200));
+
+        // average b_per_a price should be (1/3 + 1 + 1/2) / 3 = 11/18
+        let b_per_a = acc
+            .twap_b_per_a
+            .average_price(&orig.twap_b_per_a, step * 3 * 1_000_000_000);
+        let expected = Decimal::from_ratio(11u128, 18u128);
+        // they should be close to 1 part per 1_000_000 (rounding)
+        assert_eq!(
+            b_per_a * Uint128::new(1_000_000),
+            expected * Uint128::new(1_000_000)
+        );
+    }
+
+    #[test]
+    fn updating_price_buffer() {
+        let mut prices = Prices::default();
+
+        let mut env = mock_env();
+        // set price at 2.0
+        let accumulator: Accumulator =
+            Accumulator::new(env.block.time, Decimal::from_atomics(2u128, 0).unwrap());
+        let last_update = env.block.time.seconds();
+
+        // wait two minutes and accumulate
+        env.block.time = env.block.time.plus_seconds(120);
+        let checkpoint = calc_checkpoint(last_update, &env, MINUTE).unwrap();
+        prices = prices.accumulate(last_update, checkpoint, &accumulator, MINUTE);
+
+        // query the twap price at 1 minute ago vs now (should be 2.0)
+        let old_twap = prices.twap_a_per_b[1];
+        let new_twap = prices.twap_a_per_b[0];
+        let a_per_b = new_twap.average_price(&old_twap, MINUTE * 1_000_000_000u64);
+
+        assert_approx_eq!(
+            a_per_b.numerator(),
+            Decimal::from_atomics(2u128, 0).unwrap().numerator(),
+            "0.00002"
+        );
+    }
+
+    #[test]
+    fn long_gap_between_prices() {
+        let mut prices = Prices::default();
+
+        let mut env = mock_env();
+        // set price at 2.0
+        let accumulator = Accumulator::new(env.block.time, Decimal::percent(200));
+        let last_update = env.block.time.seconds();
+
+        // wait 10.5 minutes and accumulate
+        env.block.time = env.block.time.plus_seconds(10 * 60 + 30);
+        let checkpoint = calc_checkpoint(last_update, &env, MINUTE).unwrap();
+        prices = prices.accumulate(last_update, checkpoint, &accumulator, MINUTE);
+
+        let new_twap = prices.twap_a_per_b[0];
+        for i in 1..=9 {
+            // check `i` minutes ago vs latest
+            let old_twap = prices.twap_a_per_b[i];
+
+            let a_per_b = new_twap.average_price(&old_twap, i as u64 * MINUTE * 1_000_000_000u64);
+            assert_eq!(a_per_b.numerator(), Decimal::percent(200).numerator());
+        }
+        assert_eq!(prices.twap_a_per_b.len(), 10);
+    }
+
+    #[test]
+    fn buffer_len() {
+        let mut prices = Prices::default();
+
+        let mut env = mock_env();
+        let mut accumulator = Accumulator::new(env.block.time, Decimal::one());
+        let last_update = env.block.time.seconds();
+
+        // wait 1 second and accumulate
+        env.block.time = env.block.time.plus_seconds(1);
+        let checkpoint = calc_checkpoint(last_update, &env, 1).unwrap();
+        prices = prices.accumulate(last_update, checkpoint, &accumulator, 1);
+        let last_update = env.block.time.seconds();
+        // change accumulator price
+        accumulator.update(&env, Decimal::percent(200));
+
+        // wait `BUFFER_DEPTH` seconds and accumulate (this should overwrite the first entry)
+        env.block.time = env.block.time.plus_seconds(BUFFER_DEPTH as u64);
+        let checkpoint = calc_checkpoint(last_update, &env, 1).unwrap();
+        assert_eq!(checkpoint, last_update + BUFFER_DEPTH as u64);
+        prices = prices.accumulate(last_update, checkpoint, &accumulator, 1);
+
+        // all TWAPs should come out to the new price, since the first entry was overwritten
+        let latest = prices.twap_a_per_b[0];
+        for i in 1..BUFFER_DEPTH {
+            assert_eq!(
+                latest.average_price(&prices.twap_a_per_b[i], i as u64 * 1_000_000_000u64),
+                Decimal::percent(200)
+            );
+        }
+
+        assert_eq!(prices.twap_a_per_b.len(), BUFFER_DEPTH);
     }
 }

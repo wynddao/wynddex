@@ -1,27 +1,31 @@
 use cosmwasm_std::testing::{mock_env, mock_info, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
-    attr, to_binary, Addr, BankMsg, BlockInfo, Coin, CosmosMsg, Decimal, DepsMut, Env, ReplyOn,
-    Response, StdError, SubMsg, Timestamp, Uint128, WasmMsg,
+    assert_approx_eq, attr, coins, from_binary, to_binary, Addr, BankMsg, BlockInfo, Coin,
+    CosmosMsg, Decimal, DepsMut, Env, Fraction, ReplyOn, Response, StdError, SubMsg, Timestamp,
+    Uint128, WasmMsg,
 };
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg, MinterResponse};
 use cw_utils::MsgInstantiateContractResponse;
 use proptest::prelude::*;
 
 use cw20_base::msg::InstantiateMsg as TokenInstantiateMsg;
-use wyndex::asset::{Asset, AssetInfo, AssetInfoValidated, AssetValidated};
+use wyndex::asset::{
+    Asset, AssetInfo, AssetInfoValidated, AssetValidated, MINIMUM_LIQUIDITY_AMOUNT,
+};
 use wyndex::factory::PairType;
 use wyndex::fee_config::FeeConfig;
-use wyndex::pair::MigrateMsg;
+use wyndex::oracle::{SamplePeriod, TwapResponse};
 use wyndex::pair::{
     assert_max_spread, ContractError, Cw20HookMsg, ExecuteMsg, InstantiateMsg, PairInfo,
     PoolResponse, ReverseSimulationResponse, SimulationResponse, StakeConfig, TWAP_PRECISION,
 };
+use wyndex::pair::{MigrateMsg, QueryMsg};
 
-use crate::contract::compute_offer_amount;
 use crate::contract::{
     accumulate_prices, compute_swap, execute, instantiate, migrate, query_pool,
     query_reverse_simulation, query_share, query_simulation,
 };
+use crate::contract::{compute_offer_amount, query};
 use crate::state::{Config, CONFIG};
 // TODO: Copied here just as a temporary measure
 use crate::mock_querier::mock_dependencies;
@@ -50,6 +54,7 @@ fn default_stake_config() -> StakeConfig {
         min_bond: Uint128::new(1000),
         unbonding_periods: vec![60 * 60 * 24 * 7],
         max_distributions: 6,
+        converter: None,
     }
 }
 
@@ -206,6 +211,35 @@ fn test_freezing_a_pool_blocking_actions_then_unfreeze() {
     );
     // Do one successful action before freezing just for sanity
     execute(deps.as_mut(), env.clone(), info, msg).unwrap();
+
+    // Manually set the correct balances for the pool
+    deps.querier.with_balance(&[(
+        &String::from(MOCK_CONTRACT_ADDR),
+        &[Coin {
+            denom: "uusd".to_string(),
+            amount: Uint128::new(100_000000000000000000),
+        }],
+    )]);
+    deps.querier.with_token_balances(&[
+        (
+            &String::from("liquidity0000"),
+            &[
+                (&String::from(MOCK_CONTRACT_ADDR), &MINIMUM_LIQUIDITY_AMOUNT),
+                (
+                    &String::from("addr0000"),
+                    &(Uint128::new(100_000000000000000000) - MINIMUM_LIQUIDITY_AMOUNT),
+                ),
+            ],
+        ),
+        (
+            &String::from("asset0000"),
+            &[(
+                &String::from(MOCK_CONTRACT_ADDR),
+                &Uint128::new(100_000000000000000000),
+            )],
+        ),
+    ]);
+
     // Migrate with the freeze migrate message
     migrate(
         deps.as_mut(),
@@ -245,7 +279,7 @@ fn test_freezing_a_pool_blocking_actions_then_unfreeze() {
     );
 
     // Assert an error and that its frozen
-    let res: ContractError = execute(deps.as_mut(), env, info, msg).unwrap_err();
+    let res: ContractError = execute(deps.as_mut(), env.clone(), info, msg).unwrap_err();
     assert_eq!(res, ContractError::ContractFrozen {});
     // Also do a swap, which should also fail
     let msg = ExecuteMsg::Swap {
@@ -261,7 +295,6 @@ fn test_freezing_a_pool_blocking_actions_then_unfreeze() {
         referral_commission: None,
     };
 
-    let env = mock_env();
     let info = mock_info(
         "addr0000",
         &[Coin {
@@ -279,7 +312,7 @@ fn test_freezing_a_pool_blocking_actions_then_unfreeze() {
             protocol_fee_bps: 5,
         },
     };
-    let res = execute(deps.as_mut(), env, info, msg).unwrap_err();
+    let res = execute(deps.as_mut(), env.clone(), info, msg).unwrap_err();
     assert_eq!(res, ContractError::ContractFrozen {});
 
     // Normal sell but with CW20
@@ -296,10 +329,9 @@ fn test_freezing_a_pool_blocking_actions_then_unfreeze() {
         })
         .unwrap(),
     });
-    let env = mock_env_with_block_time(1000);
     let info = mock_info("asset0000", &[]);
 
-    let res = execute(deps.as_mut(), env, info, msg).unwrap_err();
+    let res = execute(deps.as_mut(), env.clone(), info, msg).unwrap_err();
     assert_eq!(res, ContractError::ContractFrozen {});
 
     // But we can withdraw liquidity
@@ -311,7 +343,6 @@ fn test_freezing_a_pool_blocking_actions_then_unfreeze() {
         amount: Uint128::new(100u128),
     });
 
-    let env = mock_env();
     let info = mock_info("liquidity0000", &[]);
     // We just want to ensure it doesn't fail with a ContractFrozen error
     execute(deps.as_mut(), env.clone(), info, msg).unwrap();
@@ -372,7 +403,6 @@ fn test_freezing_a_pool_blocking_actions_then_unfreeze() {
         receiver: None,
     };
 
-    let env = mock_env_with_block_time(env.block.time.seconds() + 1000);
     let info = mock_info(
         "addr0001",
         &[Coin {
@@ -380,7 +410,7 @@ fn test_freezing_a_pool_blocking_actions_then_unfreeze() {
             amount: Uint128::from(99_000000000000000000u128),
         }],
     );
-    execute(deps.as_mut(), env, info, msg).unwrap();
+    execute(deps.as_mut(), env.clone(), info, msg).unwrap();
 
     // Normal sell but with CW20
     let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
@@ -396,7 +426,6 @@ fn test_freezing_a_pool_blocking_actions_then_unfreeze() {
         })
         .unwrap(),
     });
-    let env = mock_env_with_block_time(1000);
     let info = mock_info("asset0000", &[]);
 
     execute(deps.as_mut(), env, info, msg).unwrap();
@@ -910,6 +939,14 @@ fn withdraw_liquidity() {
     // Store liquidity token
     store_liquidity_token(deps.as_mut(), "liquidity0000".to_string());
 
+    // need to initialize oracle, because we don't call `provide_liquidity` in this test
+    wyndex::oracle::initialize_oracle(
+        &mut deps.storage,
+        &mock_env_with_block_time(0),
+        Decimal::one(),
+    )
+    .unwrap();
+
     // Withdraw liquidity
     let msg = ExecuteMsg::Receive(Cw20ReceiveMsg {
         sender: String::from("addr0000"),
@@ -987,6 +1024,164 @@ fn withdraw_liquidity() {
 }
 
 #[test]
+fn query_twap() {
+    let mut deps = mock_dependencies(&[]);
+    let mut env = mock_env();
+
+    let user = "user";
+
+    // setup some cw20 tokens, so the queries don't fail
+    deps.querier.with_token_balances(&[
+        (
+            &"asset0000".into(),
+            &[(&MOCK_CONTRACT_ADDR.into(), &0u128.into())],
+        ),
+        (
+            &"liquidity0000".into(),
+            &[(&MOCK_CONTRACT_ADDR.into(), &0u128.into())],
+        ),
+    ]);
+
+    let uusd = AssetInfoValidated::Native("uusd".to_string());
+    let token = AssetInfoValidated::Token(Addr::unchecked("asset0000"));
+
+    // instantiate the contract
+    let msg = InstantiateMsg {
+        asset_infos: vec![uusd.clone().into(), token.clone().into()],
+        token_code_id: 10u64,
+        factory_addr: String::from("factory"),
+        init_params: None,
+        staking_config: default_stake_config(),
+        trading_starts: 0,
+        fee_config: FeeConfig {
+            total_fee_bps: 0,
+            protocol_fee_bps: 0,
+        },
+        circuit_breaker: None,
+    };
+    instantiate(deps.as_mut(), env.clone(), mock_info("owner", &[]), msg).unwrap();
+
+    // Store the liquidity token
+    store_liquidity_token(deps.as_mut(), "liquidity0000".to_string());
+
+    // provide liquidity to get a first price
+    let msg = ExecuteMsg::ProvideLiquidity {
+        assets: vec![
+            Asset {
+                info: uusd.clone().into(),
+                amount: 1_000_000u128.into(),
+            },
+            Asset {
+                info: token.into(),
+                amount: 1_000_000u128.into(),
+            },
+        ],
+        slippage_tolerance: None,
+        receiver: None,
+    };
+    // need to set balance manually to simulate funds being sent
+    deps.querier
+        .with_balance(&[(&MOCK_CONTRACT_ADDR.into(), &coins(1_000_000u128, "uusd"))]);
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        mock_info(user, &coins(1_000_000u128, "uusd")),
+        msg,
+    )
+    .unwrap();
+
+    // set cw20 balance manually
+    deps.querier.with_token_balances(&[
+        (
+            &"asset0000".into(),
+            &[(&MOCK_CONTRACT_ADDR.into(), &1_000_000u128.into())],
+        ),
+        (
+            &"liquidity0000".into(),
+            &[(&MOCK_CONTRACT_ADDR.into(), &0u128.into())],
+        ),
+    ]);
+
+    // querying TWAP after first price change should fail, because only one price is recorded
+    let err = query(
+        deps.as_ref(),
+        env.clone(),
+        QueryMsg::Twap {
+            duration: SamplePeriod::HalfHour,
+            start_age: 1,
+            end_age: Some(0),
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        StdError::generic_err("start index is earlier than earliest recorded price data"),
+        err
+    );
+
+    // forward time half an hour
+    const HALF_HOUR: u64 = 30 * 60;
+    env.block.time = env.block.time.plus_seconds(HALF_HOUR);
+
+    // swap to get a second price
+    let msg = ExecuteMsg::Swap {
+        offer_asset: Asset {
+            info: uusd.into(),
+            amount: 1_000u128.into(),
+        },
+        to: None,
+        max_spread: None,
+        belief_price: None,
+        ask_asset_info: None,
+        referral_address: None,
+        referral_commission: None,
+    };
+    // need to set balance manually to simulate funds being sent
+    deps.querier
+        .with_balance(&[(&MOCK_CONTRACT_ADDR.into(), &coins(1_001_000u128, "uusd"))]);
+    execute(
+        deps.as_mut(),
+        env.clone(),
+        mock_info(user, &coins(1_000u128, "uusd")),
+        msg,
+    )
+    .unwrap();
+
+    // forward time half an hour again for the last change to accumulate
+    env.block.time = env.block.time.plus_seconds(HALF_HOUR);
+
+    // query twap after swap price change
+    let twap: TwapResponse = from_binary(
+        &query(
+            deps.as_ref(),
+            env,
+            QueryMsg::Twap {
+                duration: SamplePeriod::HalfHour,
+                start_age: 1,
+                end_age: Some(0),
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert!(twap.a_per_b > Decimal::one());
+    assert!(twap.b_per_a < Decimal::one());
+    assert_approx_eq!(
+        twap.a_per_b.numerator(),
+        Decimal::from_ratio(1_001_000u128, 999_000u128).numerator(),
+        "0.000002",
+        "twap should be slightly below 1"
+    );
+    assert_approx_eq!(
+        twap.b_per_a.numerator(),
+        Decimal::from_ratio(999_000u128, 1_001_000u128).numerator(),
+        "0.000002",
+        "twap should be slightly above 1"
+    );
+}
+
+#[test]
 fn try_native_to_token() {
     let total_share = Uint128::new(30000000000u128);
     let asset_pool_amount = Uint128::new(20000000000u128);
@@ -1033,6 +1228,14 @@ fn try_native_to_token() {
 
     // Store liquidity token
     store_liquidity_token(deps.as_mut(), "liquidity0000".to_string());
+
+    // need to initialize oracle, because we don't call `provide_liquidity` in this test
+    wyndex::oracle::initialize_oracle(
+        &mut deps.storage,
+        &mock_env_with_block_time(0),
+        Decimal::one(),
+    )
+    .unwrap();
 
     // Normal swap
     let msg = ExecuteMsg::Swap {
@@ -1243,6 +1446,14 @@ fn try_token_to_native() {
 
     // Store liquidity token
     store_liquidity_token(deps.as_mut(), "liquidity0000".to_string());
+
+    // need to initialize oracle, because we don't call `provide_liquidity` in this test
+    wyndex::oracle::initialize_oracle(
+        &mut deps.storage,
+        &mock_env_with_block_time(0),
+        Decimal::one(),
+    )
+    .unwrap();
 
     // Unauthorized access; can not execute swap directy for token swap
     let msg = ExecuteMsg::Swap {

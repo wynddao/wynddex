@@ -25,6 +25,18 @@ pub struct Config {
     pub max_distributions: u32,
     /// Address of the account that can call [`ExecuteMsg::QuickUnbond`]
     pub unbonder: Option<Addr>,
+    /// Configuration for the [`crate::msg::ExecuteMsg::MigrateStake`] message.
+    /// Allows converting staked LP tokens to LP tokens of another pool.
+    /// E.g. LP tokens of the USDC-JUNO pool can be converted to LP tokens of the USDC-wyJUNO pool
+    pub converter: Option<ConverterConfig>,
+}
+
+#[cw_serde]
+pub struct ConverterConfig {
+    /// Address of the contract that converts the LP tokens
+    pub contract: Addr,
+    /// Address of the pair contract the converter should convert to
+    pub pair_to: Addr,
 }
 
 #[cw_serde]
@@ -289,6 +301,9 @@ pub const WITHDRAW_ADJUSTMENT: Map<(&Addr, &AssetInfoValidated), WithdrawAdjustm
 
 /// User delegated for funds withdrawal
 pub const DELEGATED: Map<&Addr, Addr> = Map::new("delegated");
+
+/// Flag to allow fast unbonding in emergency cases.
+pub const UNBOND_ALL: Item<bool> = Item::new("unbond_all");
 
 #[cfg(test)]
 mod tests {

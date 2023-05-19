@@ -2,6 +2,7 @@ pub mod asset;
 pub mod common;
 pub mod factory;
 pub mod fee_config;
+pub mod lp_converter;
 /// Contains some helper functions for storing the price history.
 pub mod oracle;
 pub mod pair;

@@ -1,7 +1,6 @@
 use cosmwasm_std::{Decimal, Decimal256, Deps, Env, StdResult, Storage, Uint128, Uint256, Uint64};
 use itertools::Itertools;
 use std::cmp::Ordering;
-use wyndex::oracle::PricePoint;
 
 use wyndex::asset::{AssetInfoValidated, Decimal256Ext, DecimalAsset};
 use wyndex::pair::TWAP_PRECISION;
@@ -216,43 +215,22 @@ pub fn accumulate_prices(
     Ok(true)
 }
 
-/// Calculates new prices for the assets in the pool.
-/// Returns the array of new prices for the different combinations of assets in the pool or
-/// an empty vector if one of the pools is empty.
-///
-/// * **pools** array with assets available in the pool *after* the latest operation.
-// note: will be used for oracles
-#[allow(dead_code)]
-pub fn calc_new_prices(
+/// Calculates the new price of B in terms of A, i.e. how many A you get for 1 B,
+/// where A is the first asset in `config.pair_info.asset_infos` and B the second.
+pub fn calc_new_price_a_per_b(
     deps: Deps,
     env: &Env,
     config: &Config,
     pools: &[DecimalAsset],
-) -> Result<Vec<PricePoint>, ContractError> {
-    if pools.iter().all(|pool| !pool.amount.is_zero()) {
-        let mut prices = Vec::with_capacity(config.cumulative_prices.len());
-        for (from, to, _) in &config.cumulative_prices {
-            let offer_asset = DecimalAsset {
-                info: from.clone(),
-                amount: Decimal256::one(),
-            };
-
-            let (offer_pool, ask_pool) = select_pools(Some(from), Some(to), pools)?;
-            let SwapResult { return_amount, .. } = compute_swap(
-                deps.storage,
-                env,
-                config,
-                &offer_asset,
-                &offer_pool,
-                &ask_pool,
-                pools,
-            )?;
-            prices.push(PricePoint::new(from.clone(), to.clone(), return_amount));
-        }
-        Ok(prices)
-    } else {
-        Ok(vec![])
-    }
+) -> Result<Decimal, ContractError> {
+    calc_spot_price(
+        deps,
+        env,
+        config,
+        &config.pair_info.asset_infos[1],
+        &config.pair_info.asset_infos[0],
+        pools,
+    )
 }
 
 pub fn calc_spot_price(

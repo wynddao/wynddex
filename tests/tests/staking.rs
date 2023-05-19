@@ -5,8 +5,9 @@ use cosmwasm_std::{coin, from_slice, Addr, Decimal, Uint128};
 use wyndex::{
     asset::{AssetInfo, AssetInfoExt},
     factory::PartialStakeConfig,
+    stake::ReceiveMsg,
 };
-use wyndex_stake::msg::{QueryMsg as StakeQueryMsg, ReceiveDelegationMsg, StakedResponse};
+use wyndex_stake::msg::{QueryMsg as StakeQueryMsg, StakedResponse};
 use wyndex_stake::state::Config as WyndexStakeConfig;
 
 mod staking {
@@ -35,6 +36,7 @@ mod staking {
                 min_bond: Uint128::new(1),
                 unbonding_periods: vec![1, 2],
                 max_distributions: 1,
+                converter: None,
             })
             .build();
 
@@ -87,7 +89,7 @@ mod staking {
                 &pair_info.liquidity_token,
                 1000,
                 pair_info.staking_addr.as_str(),
-                ReceiveDelegationMsg::Delegate {
+                ReceiveMsg::Delegate {
                     unbonding_period: 1,
                     delegate_as: None,
                 },
@@ -181,6 +183,7 @@ mod staking {
                 min_bond: Uint128::new(1),
                 unbonding_periods: vec![1],
                 max_distributions: 3,
+                converter: None,
             })
             .build();
 

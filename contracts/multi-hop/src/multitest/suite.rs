@@ -100,6 +100,7 @@ impl SuiteBuilder {
                     SECONDS_PER_DAY * 21,
                 ],
                 max_distributions: 6,
+                converter: None,
             },
         }
     }

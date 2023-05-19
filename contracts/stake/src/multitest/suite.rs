@@ -7,7 +7,6 @@ use cw20::{BalanceResponse, Cw20Coin, Cw20ExecuteMsg, Cw20QueryMsg, MinterRespon
 use cw20_base::msg::InstantiateMsg as Cw20InstantiateMsg;
 use cw_controllers::{Claim, ClaimsResponse};
 use cw_multi_test::{App, AppResponse, Contract, ContractWrapper, Executor};
-use wynd_curve_utils::Curve;
 use wyndex::{
     asset::{AssetInfo, AssetInfoExt, AssetInfoValidated, AssetValidated},
     stake::{InstantiateMsg, UnbondingPeriod},
@@ -16,9 +15,10 @@ use wyndex::{
 use crate::msg::{
     AllStakedResponse, AnnualizedReward, AnnualizedRewardsResponse, BondingInfoResponse,
     BondingPeriodInfo, DelegatedResponse, DistributedRewardsResponse, ExecuteMsg, QueryMsg,
-    ReceiveDelegationMsg, RewardsPowerResponse, StakedResponse, TotalStakedResponse,
+    RewardsPowerResponse, StakedResponse, TotalStakedResponse, UnbondAllResponse,
     UndistributedRewardsResponse, WithdrawableRewardsResponse,
 };
+use wyndex::stake::{FundingInfo, ReceiveMsg};
 
 pub const SEVEN_DAYS: u64 = 604800;
 
@@ -190,6 +190,7 @@ impl SuiteBuilder {
                     admin: self.admin,
                     unbonder: self.unbonder,
                     max_distributions: 6,
+                    converter: None,
                 },
                 &[],
                 "stake",
@@ -320,7 +321,7 @@ impl Suite {
             &Cw20ExecuteMsg::Send {
                 contract: self.stake_contract.to_string(),
                 amount: amount.into(),
-                msg: to_binary(&ReceiveDelegationMsg::Delegate {
+                msg: to_binary(&ReceiveMsg::Delegate {
                     unbonding_period: self.unbonding_period_or_default(unbonding_period),
                     delegate_as: delegate_as.map(|s| s.to_string()),
                 })?,
@@ -348,7 +349,7 @@ impl Suite {
             &Cw20ExecuteMsg::Send {
                 contract: self.stake_contract.to_string(),
                 amount: amount.into(),
-                msg: to_binary(&ReceiveDelegationMsg::MassDelegate {
+                msg: to_binary(&ReceiveMsg::MassDelegate {
                     unbonding_period: self.unbonding_period_or_default(unbonding_period),
                     delegate_to,
                 })?,
@@ -463,11 +464,17 @@ impl Suite {
     ) -> AnyResult<AppResponse> {
         let _sender = sender.into();
 
+        let curr_block = self.app.block_info().time;
+
         self.app.execute_contract(
             Addr::unchecked(executor),
             self.stake_contract.clone(),
             &ExecuteMsg::FundDistribution {
-                curve: Curve::saturating_linear((0, funds.amount.u128()), (100, 0)),
+                funding_info: FundingInfo {
+                    start_time: curr_block.seconds(),
+                    distribution_duration: 100,
+                    amount: funds.amount,
+                },
             },
             &[Coin {
                 denom: funds.info.to_string(),
@@ -481,13 +488,19 @@ impl Suite {
         executor: &str,
         denom: impl Into<String>,
         amount: u128,
-        reward_period: u64,
+        distribution_duration: u64,
     ) -> AnyResult<AppResponse> {
+        let curr_block = self.app.block_info().time;
+
         self.app.execute_contract(
             Addr::unchecked(executor),
             self.stake_contract.clone(),
             &ExecuteMsg::FundDistribution {
-                curve: Curve::saturating_linear((0, amount), (reward_period, 0)),
+                funding_info: FundingInfo {
+                    start_time: curr_block.seconds(),
+                    distribution_duration,
+                    amount: Uint128::from(amount),
+                },
             },
             &[Coin {
                 denom: denom.into(),
@@ -503,10 +516,16 @@ impl Suite {
         funds: AssetValidated,
     ) -> AnyResult<AppResponse> {
         let funds_amount = funds.amount.u128();
+        let curr_block = self.app.block_info().time;
+
         self.execute_fund_distribution_with_cw20_curve(
             executor,
             funds,
-            Curve::saturating_linear((0, funds_amount), (100, 0)),
+            FundingInfo {
+                start_time: curr_block.seconds(),
+                distribution_duration: 100,
+                amount: Uint128::from(funds_amount),
+            },
         )
     }
 
@@ -514,7 +533,7 @@ impl Suite {
         &mut self,
         executor: &str,
         funds: AssetValidated,
-        curve: Curve,
+        funding_info: FundingInfo,
     ) -> AnyResult<AppResponse> {
         let token = match funds.info {
             AssetInfoValidated::Token(contract_addr) => contract_addr,
@@ -526,8 +545,26 @@ impl Suite {
             &Cw20ExecuteMsg::Send {
                 contract: self.stake_contract.to_string(),
                 amount: funds.amount,
-                msg: to_binary(&ReceiveDelegationMsg::Fund { curve })?,
+                msg: to_binary(&ReceiveMsg::Fund { funding_info })?,
             },
+            &[],
+        )
+    }
+
+    pub fn execute_unbond_all(&mut self, executor: &str) -> AnyResult<AppResponse> {
+        self.app.execute_contract(
+            Addr::unchecked(executor),
+            self.stake_contract.clone(),
+            &ExecuteMsg::UnbondAll {},
+            &[],
+        )
+    }
+
+    pub fn execute_stop_unbond_all(&mut self, executor: &str) -> AnyResult<AppResponse> {
+        self.app.execute_contract(
+            Addr::unchecked(executor),
+            self.stake_contract.clone(),
+            &ExecuteMsg::StopUnbondAll {},
             &[],
         )
     }
@@ -737,5 +774,14 @@ impl Suite {
             .map(|(a, p)| (a, p.u128()))
             .filter(|(_, p)| *p > 0)
             .collect())
+    }
+
+    pub fn query_unbond_all(&self) -> StdResult<bool> {
+        let resp: UnbondAllResponse = self
+            .app
+            .wrap()
+            .query_wasm_smart(self.stake_contract.clone(), &QueryMsg::UnbondAll {})?;
+
+        Ok(resp.unbond_all)
     }
 }

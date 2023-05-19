@@ -74,6 +74,24 @@ pub enum ContractError {
 
     #[error("No reward duration provided for rewards distribution")]
     ZeroRewardDuration {},
+
+    #[error("Cannot migrate stake without a converter contract")]
+    NoConverter {},
+
+    #[error("Fund distribution cannot start in the past.")]
+    PastStartingTime {},
+
+    #[error("Unbond all flag is already set to true")]
+    FlagAlreadySet {},
+
+    #[error("Cannot delegate when unbond all flag is set to true")]
+    CannotDelegateIfUnbondAll {},
+
+    #[error("Cannot distribute {what} when unbond all flag is set to true")]
+    CannotDistributeIfUnbondAll { what: String },
+
+    #[error("Cannot rebond when unbond all flag is set to true, unbond instead")]
+    CannotRebondIfUnbondAll {},
 }
 
 impl From<OverflowError> for ContractError {

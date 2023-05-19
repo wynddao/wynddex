@@ -28,6 +28,7 @@ fn default_stake_config() -> DefaultStakeConfig {
         min_bond: Uint128::new(1000),
         unbonding_periods: vec![1],
         max_distributions: 6,
+        converter: None,
     }
 }
 
