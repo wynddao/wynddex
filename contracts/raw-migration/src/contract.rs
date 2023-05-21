@@ -1,3 +1,4 @@
+use std::cmp::min;
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
@@ -36,6 +37,8 @@ pub fn instantiate(
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(_deps: Deps, _env: Env, msg: QueryMsg) -> Result<Binary, ContractError> {
+    // Block before the migration was started
+    let migration_height: u64 = 6634356;
     match msg {
         QueryMsg::MigrationFinished {} => {
             let no_stakers = stake_cw20::state::STAKED_BALANCES
@@ -43,6 +46,17 @@ pub fn query(_deps: Deps, _env: Env, msg: QueryMsg) -> Result<Binary, ContractEr
                 .next()
                 .is_none();
             Ok(to_binary(&no_stakers)?)
+        },
+        QueryMsg::TotalStakedAtHeight { height } => {
+            let new_height = min(migration_height,height.unwrap_or(u64::MAX));
+            let staked_total = stake_cw20::state::STAKED_TOTAL.may_load_at_height(_deps.storage, new_height)?.unwrap_or_default();
+            Ok(to_binary(&stake_cw20::msg::TotalStakedAtHeightResponse{ total: staked_total, height: new_height })?)
+        },
+        QueryMsg::StakedBalanceAtHeight { address, height } => {
+            let address = _deps.api.addr_validate(&address)?;
+            let new_height = min(migration_height,height.unwrap_or(u64::MAX));
+            let balance = stake_cw20::state::STAKED_BALANCES.may_load_at_height(_deps.storage, &address, new_height)?.unwrap_or_default();
+            Ok(to_binary(&stake_cw20::msg::StakedBalanceAtHeightResponse{ balance, height: new_height })?)
         }
     }
 }

@@ -1,5 +1,6 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::Decimal;
+use stake_cw20::msg::{StakedBalanceAtHeightResponse, TotalStakedAtHeightResponse};
 
 #[cw_serde]
 pub struct InstantiateMsg {}
@@ -10,6 +11,13 @@ pub enum QueryMsg {
     /// Checks whether all stakers have been migrated
     #[returns(bool)]
     MigrationFinished {},
+    #[returns(StakedBalanceAtHeightResponse)]
+    StakedBalanceAtHeight {
+        address: String,
+        height: Option<u64>,
+    },
+    #[returns(TotalStakedAtHeightResponse)]
+    TotalStakedAtHeight { height: Option<u64> }
 }
 
 /// For existing contract, we need to specify which pool it can be withdrawn into
