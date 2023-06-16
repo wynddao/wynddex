@@ -139,7 +139,7 @@ mod staking {
                 .app
                 .wrap()
                 .query_wasm_raw(
-                    &pair_info.staking_addr,
+                    pair_info.staking_addr,
                     wyndex_pair::state::CONFIG.as_slice(),
                 )
                 .unwrap()
