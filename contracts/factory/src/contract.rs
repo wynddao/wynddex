@@ -1,18 +1,19 @@
 use cosmwasm_std::{
-    attr, entry_point, to_binary, Addr, Binary, CosmosMsg, Decimal, Deps, DepsMut, Env,
-    MessageInfo, Order, Reply, ReplyOn, Response, StdError, StdResult, SubMsg, WasmMsg,
+    attr, entry_point, from_binary, to_binary, Addr, Binary, CosmosMsg, Decimal, Deps, DepsMut,
+    Env, MessageInfo, Order, Reply, ReplyOn, Response, StdError, StdResult, SubMsg, WasmMsg,
 };
 use cw2::set_contract_version;
+use cw20::Cw20ReceiveMsg;
 use cw_utils::ensure_from_older_version;
 
-use wyndex::asset::{addr_opt_validate, AssetInfo};
+use wyndex::asset::{addr_opt_validate, Asset, AssetInfo};
 use wyndex::common::{
     claim_ownership, drop_ownership_proposal, propose_new_owner, validate_addresses,
 };
 use wyndex::factory::{
     ConfigResponse, DistributionFlow, ExecuteMsg, FeeInfoResponse, InstantiateMsg, MigrateMsg,
     PairConfig, PairType, PairsResponse, PartialDefaultStakeConfig, PartialStakeConfig, QueryMsg,
-    ROUTE,
+    ReceiveMsg, ROUTE,
 };
 use wyndex::fee_config::FeeConfig;
 use wyndex::stake::UnbondingPeriod;
@@ -22,7 +23,8 @@ use crate::error::ContractError;
 use crate::querier::query_pair_info;
 use crate::state::{
     check_asset_infos, pair_key, read_pairs, Config, TmpPairInfo, CONFIG, OWNERSHIP_PROPOSAL,
-    PAIRS, PAIRS_TO_MIGRATE, PAIR_CONFIGS, STAKING_ADDRESSES, TMP_PAIR_INFO,
+    PAIRS, PAIRS_TO_MIGRATE, PAIR_CONFIGS, PERMISSIONLESS_DEPOSIT, STAKING_ADDRESSES,
+    TMP_PAIR_INFO,
 };
 
 use itertools::Itertools;
@@ -182,6 +184,7 @@ pub fn execute(
             total_fee_bps,
             staking_config,
             Vec::new(),
+            false,
         ),
         ExecuteMsg::Deregister { asset_infos } => {
             deregister_pool_and_staking(deps, info, asset_infos)
@@ -242,12 +245,76 @@ pub fn execute(
             total_fee_bps,
             staking_config,
             distribution_flows,
+            false,
         ),
         ExecuteMsg::CreateDistributionFlow {
             asset_infos,
             asset,
             rewards,
         } => execute_create_distribution_flow(deps, env, info, asset_infos, asset, rewards),
+        ExecuteMsg::Receive(msg) => receive_cw20_message(deps, env, info, msg),
+    }
+}
+
+fn receive_cw20_message(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    msg: Cw20ReceiveMsg,
+) -> Result<Response, ContractError> {
+    let required_deposit = PERMISSIONLESS_DEPOSIT
+        .load(deps.storage)
+        .map_err(|_| ContractError::DepositNotSet {})?;
+    let deposit = Asset {
+        info: AssetInfo::Token(info.sender.to_string()),
+        amount: msg.amount,
+    };
+
+    if required_deposit != deposit {
+        return Err(ContractError::DepositRequired(
+            required_deposit.amount,
+            required_deposit.info.to_string(),
+        ));
+    }
+
+    match from_binary(&msg.msg)? {
+        ReceiveMsg::CreatePair {
+            pair_type,
+            asset_infos,
+            init_params,
+            total_fee_bps,
+            staking_config,
+        } => execute_create_pair(
+            deps,
+            info,
+            env,
+            pair_type,
+            asset_infos,
+            init_params,
+            total_fee_bps,
+            staking_config,
+            Vec::new(),
+            true,
+        ),
+        ReceiveMsg::CreatePairAndDistributionFlows {
+            pair_type,
+            asset_infos,
+            init_params,
+            total_fee_bps,
+            staking_config,
+            distribution_flows,
+        } => execute_create_pair(
+            deps,
+            info,
+            env,
+            pair_type,
+            asset_infos,
+            init_params,
+            total_fee_bps,
+            staking_config,
+            distribution_flows,
+            true,
+        ),
     }
 }
 
@@ -412,6 +479,7 @@ pub fn execute_create_pair(
     total_fee_bps: Option<u16>,
     staking_config: PartialStakeConfig,
     distribution_flows: Vec<DistributionFlow>,
+    deposit_sent: bool,
 ) -> Result<Response, ContractError> {
     let asset_infos = check_asset_infos(deps.api, &asset_infos)?;
 
@@ -419,6 +487,9 @@ pub fn execute_create_pair(
 
     if config.only_owner_can_create_pairs && info.sender != config.owner {
         return Err(ContractError::Unauthorized {});
+    }
+    if !config.only_owner_can_create_pairs && !deposit_sent {
+        return Err(ContractError::PermissionlessRequiresDeposit {});
     }
 
     if PAIRS.has(deps.storage, &pair_key(&asset_infos)) {
@@ -722,7 +793,7 @@ pub fn query_pair(deps: Deps, asset_infos: Vec<AssetInfo>) -> StdResult<PairInfo
         .map(|a| a.validate(deps.api))
         .collect::<StdResult<Vec<_>>>()?;
     let pair_addr = PAIRS.load(deps.storage, &pair_key(&asset_infos))?;
-    query_pair_info(&deps.querier, &pair_addr)
+    query_pair_info(&deps.querier, pair_addr)
 }
 
 /// Returns a vector with pair data that contains items of type [`PairInfo`]. Querying starts at `start_after` and returns `limit` pairs.
@@ -787,6 +858,9 @@ pub fn migrate(deps: DepsMut, env: Env, msg: MigrateMsg) -> Result<Response, Con
         }
         MigrateMsg::Update() => {
             ensure_from_older_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+        }
+        MigrateMsg::AddPermissionlessPoolDeposit(asset) => {
+            PERMISSIONLESS_DEPOSIT.save(deps.storage, &asset)?;
         }
     };
 

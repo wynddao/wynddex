@@ -226,7 +226,7 @@ pub fn get_pool(
                 .unwrap();
             // Return the best pair's PairInfo and the return amount
             Ok((
-                querier.query_wasm_smart(&best_pair, &wyndex::pair::QueryMsg::Pair {})?,
+                querier.query_wasm_smart(best_pair, &wyndex::pair::QueryMsg::Pair {})?,
                 Some(sim_res.return_amount),
             ))
         }

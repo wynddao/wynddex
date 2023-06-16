@@ -1,5 +1,5 @@
 use crate::{
-    asset::AssetInfo,
+    asset::{Asset, AssetInfo},
     fee_config::FeeConfig,
     pair::{PairInfo, StakeConfig},
     stake::{ConverterConfig, UnbondingPeriod},
@@ -7,6 +7,7 @@ use crate::{
 
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{Addr, Binary, Decimal, Uint128};
+use cw20::Cw20ReceiveMsg;
 use cw_storage_plus::Map;
 use std::fmt::{Display, Formatter, Result};
 
@@ -244,6 +245,45 @@ pub enum ExecuteMsg {
         /// Only periods that are defined in the contract can be used here
         rewards: Vec<(UnbondingPeriod, Decimal)>,
     },
+    /// Implements the Cw20 receiver interface.
+    Receive(Cw20ReceiveMsg),
+}
+
+#[cw_serde]
+pub enum ReceiveMsg {
+    /// CreatePair instantiates a new pair contract.
+    CreatePair {
+        /// The pair type (exposed in [`PairType`])
+        pair_type: PairType,
+        /// The assets to create the pool for
+        asset_infos: Vec<AssetInfo>,
+        /// Optional binary serialised parameters for custom pool types
+        init_params: Option<Binary>,
+        /// The total fees (in bps) charged by a pair of this type.
+        /// In relation to the returned amount of tokens.
+        /// If not provided, the default is used.
+        total_fee_bps: Option<u16>,
+        /// Config for the staking contract
+        #[serde(default)]
+        staking_config: PartialStakeConfig,
+    },
+    CreatePairAndDistributionFlows {
+        /// The pair type (exposed in [`PairType`])
+        pair_type: PairType,
+        /// The assets to create the pool for
+        asset_infos: Vec<AssetInfo>,
+        /// Optional binary serialised parameters for custom pool types
+        init_params: Option<Binary>,
+        /// The total fees (in bps) charged by a pair of this type.
+        /// In relation to the returned amount of tokens.
+        /// If not provided, the default is used.
+        total_fee_bps: Option<u16>,
+        /// Config for the staking contract
+        #[serde(default)]
+        staking_config: PartialStakeConfig,
+        /// The distribution flows to create
+        distribution_flows: Vec<DistributionFlow>,
+    },
 }
 
 #[cw_serde]
@@ -365,6 +405,8 @@ pub enum MigrateMsg {
     /// Used to instantiate from cw-placeholder
     Init(InstantiateMsg),
     Update(),
+    /// Required with <=2.1.0 migration
+    AddPermissionlessPoolDeposit(Asset),
 }
 
 /// Map which contains a list of all pairs which are able to convert X <> Y assets.

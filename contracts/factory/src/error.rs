@@ -1,4 +1,4 @@
-use cosmwasm_std::{Decimal, StdError};
+use cosmwasm_std::{Decimal, StdError, Uint128};
 use thiserror::Error;
 
 /// This enum describes factory contract errors
@@ -39,4 +39,13 @@ pub enum ContractError {
 
     #[error("Can only init upgrade from cw-placeholder")]
     NotPlaceholder,
+
+    #[error("Permissionless dex requires deposit to be set")]
+    DepositNotSet {},
+
+    #[error("Incorrect deposit: permissionless factory requires deposit as: {0}{1}")]
+    DepositRequired(Uint128, String),
+
+    #[error("Factory is in permissionless mode: deposit must be sent to create new pair")]
+    PermissionlessRequiresDeposit {},
 }
