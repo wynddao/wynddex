@@ -18,7 +18,12 @@ pub struct FactoryHelper {
 }
 
 impl FactoryHelper {
+    #[allow(dead_code)]
     pub fn init(router: &mut App, owner: &Addr) -> Self {
+        Self::instantiate(router, owner, None)
+    }
+
+    pub fn instantiate(router: &mut App, owner: &Addr, factory_code_id: Option<u64>) -> Self {
         let astro_token_contract = Box::new(ContractWrapper::new_with_empty(
             cw20_base::contract::execute,
             cw20_base::contract::instantiate,
@@ -61,16 +66,19 @@ impl FactoryHelper {
 
         let pair_code_id = router.store_code(pair_contract);
 
-        let factory_contract = Box::new(
-            ContractWrapper::new_with_empty(
-                wyndex_factory::contract::execute,
-                wyndex_factory::contract::instantiate,
-                wyndex_factory::contract::query,
-            )
-            .with_reply_empty(wyndex_factory::contract::reply),
-        );
-
-        let factory_code_id = router.store_code(factory_contract);
+        let factory_code_id = if let Some(factory_code_id) = factory_code_id {
+            factory_code_id
+        } else {
+            let factory_contract = Box::new(
+                ContractWrapper::new_with_empty(
+                    wyndex_factory::contract::execute,
+                    wyndex_factory::contract::instantiate,
+                    wyndex_factory::contract::query,
+                )
+                .with_reply_empty(wyndex_factory::contract::reply),
+            );
+            router.store_code(factory_contract)
+        };
 
         let staking_contract = Box::new(ContractWrapper::new_with_empty(
             wyndex_stake::contract::execute,
@@ -112,7 +120,7 @@ impl FactoryHelper {
                 &msg,
                 &[],
                 String::from("ASTRO"),
-                None,
+                Some(owner.to_string()),
             )
             .unwrap();
 
@@ -168,6 +176,7 @@ impl FactoryHelper {
         router.execute_contract(sender.clone(), self.factory.clone(), &msg, &[])
     }
 
+    #[allow(dead_code)]
     pub fn deregister_pool_and_staking(
         &mut self,
         router: &mut App,
@@ -201,6 +210,7 @@ impl FactoryHelper {
         Ok(res.contract_addr)
     }
 
+    #[allow(dead_code)]
     pub fn update_pair_fees(
         &mut self,
         router: &mut App,

@@ -19,7 +19,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.64.0
+          toolchain: 1.70.0
           target: wasm32-unknown-unknown
           override: true
 
@@ -27,7 +27,7 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: install
-          args: cargo-tarpaulin --version 0.20.1
+          args: cargo-tarpaulin --version 0.25.2
 
       - name: Run code coverage check with tarpaulin
         uses: actions-rs/cargo@v1

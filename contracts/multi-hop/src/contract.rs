@@ -157,7 +157,7 @@ mod execute {
                 let config = CONFIG.load(deps.storage)?;
                 let pair_info = query_pair_info(
                     &deps.querier,
-                    &config.wyndex_factory,
+                    config.wyndex_factory,
                     &[offer_asset_info.clone(), ask_asset_info.clone()],
                 )?;
 

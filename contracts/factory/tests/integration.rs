@@ -8,7 +8,7 @@ use wyndex::factory::{
 };
 use wyndex::fee_config::FeeConfig;
 use wyndex::pair::PairInfo;
-use wyndex_factory::state::Config;
+use wyndex_factory::{error::ContractError, state::Config};
 
 use crate::factory_helper::{instantiate_token, FactoryHelper};
 use cw_multi_test::{App, ContractWrapper, Executor};
@@ -93,10 +93,7 @@ fn proper_initialization() {
         .unwrap();
 
     let msg = QueryMsg::Config {};
-    let config_res: ConfigResponse = app
-        .wrap()
-        .query_wasm_smart(&factory_instance, &msg)
-        .unwrap();
+    let config_res: ConfigResponse = app.wrap().query_wasm_smart(factory_instance, &msg).unwrap();
 
     assert_eq!(123, config_res.token_code_id);
     assert_eq!(pair_configs, config_res.pair_configs);
@@ -524,7 +521,8 @@ fn test_create_pair_permissions() {
         .unwrap();
 
     // now it should work
-    helper
+    // addendum: it does work but a required deposit has been added; check migration.rs test
+    let err = helper
         .create_pair(
             &mut app,
             &user,
@@ -533,7 +531,11 @@ fn test_create_pair_permissions() {
             None,
             None,
         )
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(
+        ContractError::PermissionlessRequiresDeposit {},
+        err.downcast().unwrap()
+    );
 }
 
 #[test]
@@ -932,10 +934,8 @@ fn can_migrate_the_placeholder_to_a_factory_properly() {
     // Query the 'placeholder' which is now a Factory
     let migrated_factory_config: ConfigResponse =
         app.wrap().query_wasm_smart(&placeholder, &msg).unwrap();
-    let direct_factory_config: ConfigResponse = app
-        .wrap()
-        .query_wasm_smart(&factory_instance, &msg)
-        .unwrap();
+    let direct_factory_config: ConfigResponse =
+        app.wrap().query_wasm_smart(factory_instance, &msg).unwrap();
 
     assert_eq!(123, migrated_factory_config.token_code_id);
     assert_eq!(pair_configs, migrated_factory_config.pair_configs);

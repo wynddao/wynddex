@@ -2,7 +2,7 @@
 members = ["packages/*", "contracts/*", "tests", "utils/*"]
 
 [workspace.package]
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 license = "GPL 3.0"
 repository = "https://github.com/cosmorama/wynddex"
@@ -10,7 +10,7 @@ repository = "https://github.com/cosmorama/wynddex"
 [workspace.dependencies]
 anyhow = "1"
 wyndex = { path = "./packages/wyndex", default-features = false }
-wynd-curve-utils = { git = "https://github.com/cosmorama/wynddao.git", tag = "v1.6.0", package = "wynd-utils" }
+wynd-curve-utils = { git = "https://github.com/wynddao/wynddao.git", tag = "v1.6.0", package = "wynd-utils" }
 cw20-base = { version = "1.0", package = "cw20-base", features = ["library"] }
 wyndex-factory = { path = "./contracts/factory" }
 cw-placeholder = { path = "./contracts/cw-placeholder" }
@@ -38,8 +38,7 @@ serde = { version = "1", default-features = false, features = ["derive"] }
 thiserror = "1"
 test-case = "2.2.1"
 uint = "0.9"
-wyndex-stake-2_0_0 = { package = "wyndex-stake", git = "https://github.com/wynddao/wynddex", tag = "v2.1.0" }
-#wyndex-2_0_0 = { package = "wyndex", git = "https://github.com/wynddao/wynddex", version = "2.0.2" }
+wyndex-stake-2_0_0 = { package = "wyndex-stake", git = "https://github.com/wynddao/wynddex", tag = "v2.0.0" }
 
 
 [profile.release.package.wyndex-factory]

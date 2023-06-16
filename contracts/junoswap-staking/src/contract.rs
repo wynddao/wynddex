@@ -274,7 +274,7 @@ pub fn reply_one(deps: DepsMut, env: Env) -> Result<Response, ContractError> {
     // get the JS asset types and convert to WYND DEX types
     let info: InfoResponse = deps
         .querier
-        .query_wasm_smart(&migration.junoswap_pool, &wasmswap::msg::QueryMsg::Info {})?;
+        .query_wasm_smart(migration.junoswap_pool, &wasmswap::msg::QueryMsg::Info {})?;
     let assets = to_wyndex_assets(deps.as_ref(), env.contract.address, info)?;
 
     // figure out how to transfer these... previous cw20 allowances or
@@ -380,7 +380,7 @@ pub fn reply_two(deps: DepsMut, env: Env) -> Result<Response, ContractError> {
 
     // how many LP do we have total
     let lp_token = cw20::Cw20Contract(config.lp_token.clone());
-    let total_lp_tokens = lp_token.balance(&deps.querier, &env.contract.address)?;
+    let total_lp_tokens = lp_token.balance(&deps.querier, env.contract.address)?;
 
     // store this for `migrate_stakers` to use
     config.total_lp_tokens = total_lp_tokens;
