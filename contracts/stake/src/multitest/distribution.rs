@@ -2597,3 +2597,45 @@ fn test_unbond_brakes_reward_distribution() {
     assert_eq!(suite.query_balance(&members[0], "juno").unwrap(), 10_000);
     assert_eq!(suite.query_balance(&members[1], "juno").unwrap(), 90_000);
 }
+
+#[test]
+fn test_bond_withdraw_unbond() {
+    let member = "member";
+    let executor = "executor";
+    let unbonding_period = 10_000;
+
+    let mut suite = SuiteBuilder::new()
+        .with_unbonding_periods(vec![unbonding_period])
+        .with_min_bond(1000)
+        .with_initial_balances(vec![(member, 1_000)])
+        .with_admin("admin")
+        .with_native_balances("juno", vec![(executor, 100_000)])
+        .build();
+
+    // create distribution flow
+    suite
+        .create_distribution_flow(
+            "admin",
+            executor,
+            AssetInfo::Native("juno".to_string()),
+            vec![(unbonding_period, Decimal::one())],
+        )
+        .unwrap();
+
+    // Bond
+    suite.delegate(member, 1_000, unbonding_period).unwrap();
+
+    // Distribute rewards
+    suite
+        .distribute_funds(executor, None, Some(juno(500)))
+        .unwrap();
+
+    // Withdraw rewards
+    suite.withdraw_funds(member, member, None).unwrap();
+
+    // Unbond
+    suite.unbond(member, 1_000, unbonding_period).unwrap();
+
+    // Assert balances
+    assert_eq!(suite.query_balance(member, "juno").unwrap(), 500);
+}
