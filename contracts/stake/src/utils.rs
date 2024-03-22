@@ -22,9 +22,16 @@ pub fn create_undelegate_msg(
 }
 
 pub fn calc_power(cfg: &Config, stake: Uint128, multiplier: Decimal) -> Uint128 {
+    dbg!("CALCULATING POWER");
     if stake < cfg.min_bond {
         Uint128::zero()
     } else {
+        dbg!(
+            stake,
+            multiplier,
+            cfg.tokens_per_power,
+            stake * multiplier / cfg.tokens_per_power
+        );
         stake * multiplier / cfg.tokens_per_power
     }
 }

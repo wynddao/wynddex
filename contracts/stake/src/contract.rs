@@ -538,6 +538,7 @@ pub fn execute_mass_bond(
             .map(|((asset_info, mut distribution), old_reward_power)| {
                 let new_reward_power =
                     distribution.calc_rewards_power(deps.storage, &cfg, &sender)?;
+                dbg!("BONDING", old_reward_power, new_reward_power);
                 update_rewards(
                     deps.storage,
                     &asset_info,

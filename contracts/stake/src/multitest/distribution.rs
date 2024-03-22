@@ -2527,3 +2527,115 @@ fn withdraw_adjustment_handled_lazily() {
     // member should get rewards
     assert_eq!(suite.query_balance(member, "juno").unwrap(), 500);
 }
+
+#[test]
+fn test_unbond_brakes_reward_distribution() {
+    let members = vec!["member0".to_owned(), "member1".to_owned()];
+    let executor = "executor";
+
+    let unbonding_period = 10_000;
+
+    let mut suite = SuiteBuilder::new()
+        .with_unbonding_periods(vec![unbonding_period])
+        .with_min_bond(1000)
+        .with_initial_balances(vec![(&members[0], 1_000), (&members[1], 1_000)])
+        .with_admin("admin")
+        .with_native_balances("juno", vec![(executor, 100_000)])
+        .build();
+
+    suite
+        .create_distribution_flow(
+            "admin",
+            executor,
+            AssetInfo::Native("juno".to_string()),
+            vec![(unbonding_period, Decimal::one())],
+        )
+        .unwrap();
+
+    // delegate
+    suite
+        .delegate(&members[0], 1_000u128, unbonding_period)
+        .unwrap();
+    suite
+        .delegate(&members[1], 1_000u128, unbonding_period)
+        .unwrap();
+
+    suite.update_time(2_000);
+
+    // distribute 20% of total supply
+    suite
+        .distribute_funds(executor, executor, Some(juno(20_000)))
+        .unwrap();
+
+    // withdraw the rewards
+    suite
+        .withdraw_funds(&members[0], members[0].as_str(), None)
+        .unwrap();
+    suite
+        .withdraw_funds(&members[1], members[1].as_str(), None)
+        .unwrap();
+
+    assert_eq!(suite.query_balance(&members[0], "juno").unwrap(), 10_000);
+    assert_eq!(suite.query_balance(&members[1], "juno").unwrap(), 10_000);
+
+    suite.update_time(5_000);
+
+    // unbond member1
+    suite.unbond(&members[0], 1000, unbonding_period).unwrap();
+
+    suite.update_time(10_000);
+
+    // distribute the rest of the 100k
+    suite
+        .distribute_funds(executor, executor, Some(juno(80_000)))
+        .unwrap();
+
+    suite
+        .withdraw_funds(&members[1], members[1].as_str(), None)
+        .unwrap();
+
+    assert_eq!(suite.query_balance(&members[0], "juno").unwrap(), 10_000);
+    assert_eq!(suite.query_balance(&members[1], "juno").unwrap(), 90_000);
+}
+
+#[test]
+fn test_bond_withdraw_unbond() {
+    let user = "member";
+    let executor = "executor";
+    let unbonding_period = 10_000;
+
+    let mut suite = SuiteBuilder::new()
+        .with_unbonding_periods(vec![unbonding_period])
+        .with_min_bond(1000)
+        .with_initial_balances(vec![(user, 1_000)])
+        .with_admin("admin")
+        .with_native_balances("juno", vec![(executor, 100_000)])
+        .build();
+
+    // create distribution flow
+    suite
+        .create_distribution_flow(
+            "admin",
+            executor,
+            AssetInfo::Native("juno".to_string()),
+            vec![(unbonding_period, Decimal::one())],
+        )
+        .unwrap();
+
+    // Bond
+    suite.delegate(user, 1_000, unbonding_period).unwrap();
+
+    // Distribute rewards
+    suite
+        .distribute_funds(executor, None, Some(juno(500)))
+        .unwrap();
+
+    // Withdraw rewards
+    suite.withdraw_funds(user, user, None).unwrap();
+
+    // Unbond
+    suite.unbond(user, 1_000, unbonding_period).unwrap();
+
+    // Assert balances
+    assert_eq!(suite.query_balance(user, "juno").unwrap(), 500);
+}
