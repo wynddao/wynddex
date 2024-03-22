@@ -79,6 +79,7 @@ pub fn execute_distribute_rewards(
 
         let leftover: u128 = distribution.shares_leftover.into();
         let points = (amount << SHARES_SHIFT) + leftover;
+        dbg!(points, total_rewards.u128(), points / total_rewards.u128());
         let points_per_share = points / total_rewards.u128();
         distribution.shares_leftover = (points % total_rewards.u128()) as u64;
 
@@ -86,9 +87,11 @@ pub fn execute_distribute_rewards(
         // Full amount is added here to total withdrawable, as it should not be considered on its own
         // on future distributions - even if because of calculation offsets it is not fully
         // distributed, the error is handled by leftover.
+        // poi 1
         distribution.shares_per_point += Uint128::new(points_per_share);
         distribution.distributed_total += Uint128::new(amount);
         distribution.withdrawable_total += Uint128::new(amount);
+        dbg!(distribution.clone());
 
         DISTRIBUTION.save(deps.storage, &asset_info, &distribution)?;
 
@@ -146,6 +149,7 @@ pub fn execute_withdraw_rewards(
         let mut adjustment = WITHDRAW_ADJUSTMENT
             .may_load(deps.storage, (&owner, &asset_info))?
             .unwrap_or_default();
+        dbg!(adjustment.clone());
 
         let reward = withdrawable_rewards(deps.as_ref(), &cfg, &owner, &distribution, &adjustment)?;
 
@@ -290,8 +294,15 @@ pub fn apply_points_correction(
     diff: i128,
 ) -> StdResult<()> {
     WITHDRAW_ADJUSTMENT.update(storage, (addr, asset_info), |old| -> StdResult<_> {
-        let mut old = old.unwrap_or_default();
+        let mut old = old.unwrap_or_default(); //eq to withdraw_adjustment in phoenix
         let shares_correction: i128 = old.shares_correction;
+        dbg!(old.clone());
+        dbg!(
+            shares_correction,
+            shares_per_point,
+            diff,
+            shares_correction - shares_per_point as i128 * diff
+        );
         old.shares_correction = shares_correction - shares_per_point as i128 * diff;
         Ok(old)
     })?;
@@ -312,11 +323,12 @@ pub fn withdrawable_rewards(
         .calc_rewards_power(deps.storage, cfg, owner)?
         .u128();
 
+    dbg!(ppw, points, adjustment.clone());
     let correction = adjustment.shares_correction;
     let points = (ppw * points) as i128;
+    dbg!(ppw * points as u128);
     let points = points + correction;
     let amount = points as u128 >> SHARES_SHIFT;
     let amount = amount - adjustment.withdrawn_rewards.u128();
-
     Ok(amount.into())
 }
