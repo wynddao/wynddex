@@ -38,7 +38,11 @@ pub enum ExecuteMsg {
     /// No limit is specified for each asset and a maximum route depth is also exposed
     SwapHopAssets { assets: Vec<AssetInfo>, depth: u64 },
     /// Allows the owner to spend the contract's WYND balance. The trader contract will not be able to spend the WYND but can trade other assets to it.
-    Transfer { recipient: String, amount: Uint128 },
+    Transfer {
+        recipient: String,
+        amount: Uint128,
+        denom: AssetInfo,
+    },
 }
 
 #[cw_serde]
