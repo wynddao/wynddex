@@ -3,17 +3,19 @@ use std::collections::{HashMap, HashSet};
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    to_binary, Addr, Binary, CosmosMsg, Decimal, Deps, DepsMut, Env, MessageInfo, Order, Response,
-    StdResult, SubMsg, Uint128, WasmMsg,
+    coin, to_binary, Addr, BankMsg, Binary, CosmosMsg, Decimal, Deps, DepsMut, Env, MessageInfo,
+    Order, Response, StdResult, SubMsg, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
+use cw_utils::ensure_from_older_version;
 
 use cw20::Cw20ExecuteMsg;
 use wyndex::asset::{Asset, AssetInfo};
 
 use crate::error::ContractError;
 use crate::msg::{
-    AssetWithLimit, BalancesResponse, ConfigResponse, ExecuteMsg, InstantiateMsg, QueryMsg,
+    AssetWithLimit, BalancesResponse, ConfigResponse, ExecuteMsg, InstantiateMsg, MigrateMsg,
+    QueryMsg,
 };
 use crate::state::{Config, CONFIG, ROUTES};
 use crate::utils::{
@@ -61,7 +63,11 @@ pub fn execute(
         ExecuteMsg::SwapHopAssets { assets, depth } => {
             swap_hop_assets(deps, info.sender, env.contract.address, assets, depth)
         }
-        ExecuteMsg::Transfer { recipient, amount } => spend(deps, info, recipient, amount),
+        ExecuteMsg::Transfer {
+            recipient,
+            amount,
+            denom,
+        } => spend(deps, info, recipient, amount, denom),
     }
 }
 
@@ -79,24 +85,33 @@ pub fn spend(
     info: MessageInfo,
     recipient: String,
     amount: Uint128,
+    denom: AssetInfo,
 ) -> Result<Response, ContractError> {
     let cfg = CONFIG.load(deps.storage)?;
     // Permission check
-    if info.sender != cfg.owner {
+    if info.sender != cfg.nominated_trader {
         return Err(ContractError::Unauthorized {
             info: "Only the owner can submit a spend".to_string(),
         });
     }
 
-    Ok(Response::new()
-        .add_messages(vec![CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: cfg.token_contract.to_string(),
+    let transfer_msg = match denom {
+        AssetInfo::Token(denom) => CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: denom,
             funds: vec![],
             msg: to_binary(&Cw20ExecuteMsg::Transfer {
                 recipient: recipient.clone(),
                 amount,
             })?,
-        })])
+        }),
+        AssetInfo::Native(denom) => CosmosMsg::Bank(BankMsg::Send {
+            to_address: recipient.clone(),
+            amount: vec![coin(amount.u128(), denom)],
+        }),
+    };
+
+    Ok(Response::new()
+        .add_message(transfer_msg)
         .add_attributes(vec![
             ("action", "spend"),
             ("recipient", recipient.as_str()),
@@ -403,4 +418,10 @@ fn query_routes(deps: Deps) -> StdResult<Vec<(String, String)>> {
             Ok((route, asset.to_string()))
         })
         .collect()
+}
+
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
+    ensure_from_older_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    Ok(Response::new())
 }
